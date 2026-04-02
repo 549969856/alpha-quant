@@ -1,0 +1,98 @@
+# Python/Django
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+*.env
+*.venv
+env/
+venv/
+ENV/
+.vscode/
+.idea/
+*.sqlite3
+db.sqlite3
+*.log
+media/
+/staticfiles/
+instance/
+.DS_Store
+
+# Django migrations (if you want to ignore auto-generated migrations)
+# Uncomment below if migrating from local only, not in version control
+**/migrations/*.py
+!**/migrations/__init__.py
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SQLAlchemy
+*.db
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Node / frontend
+node_modules/
+package-lock.json
+yarn-error.log
+yarn-debug.log
+npm-debug.log
+/dist
+/.vite
+/public/build
+*.tgz
+
+# VS Code
+.vscode/
+
+# Docker
+docker-compose.override.yml
+.env
+
+# System
+*.tmp
+*.swp
+*~
+
+# Logs
+logs/
+*.log
+
+# Python virtual env
+.venv/
+env/
+
+# pytest
+.pytest_cache/
+
+# pipenv
+Pipfile.lock
+
+# coverage
+.coverage
+htmlcov/
+.coverage.*
+
+# Jupyter
+.ipynb_checkpoints
+
+# local project data
+data/
+
+# 其它 IDE 檔案
+.idea/
+*.iml
+
+# 低重要性：前端編譯輸出
+dist/
+build/

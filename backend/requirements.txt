@@ -1,0 +1,35 @@
+# Web Framework
+Django==5.0.4
+djangorestframework==3.15.1
+djangorestframework-simplejwt==5.3.1
+django-cors-headers==4.3.1
+django-filter==24.2
+drf-spectacular==0.27.2
+
+# Database
+psycopg2-binary==2.9.9
+django-timescaledb==0.2.1
+dj-database-url
+
+
+# Async tasks
+celery==5.4.0
+redis==5.0.4
+django-celery-beat==2.6.0
+django-celery-results==2.5.1
+flower==2.0.1
+
+# ML & Data
+torch==2.3.0
+numpy==1.26.4
+pandas==2.2.2
+pyarrow
+yfinance==0.2.40
+ta==0.11.0
+scikit-learn==1.5.0
+joblib==1.4.2
+
+# Config
+python-decouple==3.8
+gunicorn==22.0.0
+structlog==24.2.0
