@@ -1,7 +1,16 @@
-export default function MetricCard({ label, value, sub, trend, mono = false }) {
+export default function MetricCard({
+  label,
+  value,
+  sub,
+  trend,
+  mono = false,
+  positiveColor = "#34d399",
+  negativeColor = "#f87171",
+  neutralColor = "#94a3b8",
+}) {
   const trendColor =
-    trend === "positive" ? "#34d399" :
-    trend === "negative" ? "#f87171" : "#94a3b8";
+    trend === "positive" ? positiveColor :
+    trend === "negative" ? negativeColor : neutralColor;
 
   return (
     <div className="card" style={{padding:"18px 20px"}}>

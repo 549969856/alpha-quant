@@ -7,6 +7,10 @@ import {
 } from "recharts";
 import MetricCard from "../components/ui/MetricCard";
 
+const UP_COLOR = "#f87171";
+const DOWN_COLOR = "#34d399";
+const NEUTRAL_COLOR = "#94a3b8";
+
 const T = ({active,payload,label})=>active&&payload?.length?(
   <div style={{background:"#1e293b",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,padding:"10px 14px",fontSize:11}}>
     <p style={{color:"#64748b",marginBottom:6}}>{label}</p>
@@ -39,11 +43,16 @@ export default function BacktestPage() {
   const dd = data?.drawdown_curve??[];
   const pos= data?.position_log??[];
 
-  const combined = eq.map((e,i)=>({date:e.date,strategy:+e.value.toFixed(4),bh:+(bh[i]?.value??1).toFixed(4)}));
+  const bhMap = new Map(bh.map(point => [point.date, point.value]));
+  const combined = eq.map((e)=>({
+    date:e.date,
+    strategy:+Number(e.value ?? 1).toFixed(4),
+    bh:+Number(bhMap.get(e.date) ?? 1).toFixed(4),
+  }));
   const posCount = [
-    {name:"做空",value:pos.filter(p=>p.position===-1).length,fill:"#f87171"},
+    {name:"做空",value:pos.filter(p=>p.position===-1).length,fill:DOWN_COLOR},
     {name:"觀望",value:pos.filter(p=>p.position===0).length,fill:"#4b5563"},
-    {name:"做多",value:pos.filter(p=>p.position===1).length,fill:"#34d399"},
+    {name:"做多",value:pos.filter(p=>p.position===1).length,fill:UP_COLOR},
   ];
   const alphaData = combined.map(d=>({date:d.date,alpha:+((d.strategy-d.bh)*100).toFixed(3)}));
 
@@ -71,14 +80,14 @@ export default function BacktestPage() {
 
       {/* Metrics */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:20}}>
-        <MetricCard label="策略總報酬"   value={pct(m.total_return)}   trend={m.total_return>0?"positive":"negative"} mono />
-        <MetricCard label="Buy & Hold"  value={pct(m.bh_return)}      trend={m.bh_return>0?"positive":"negative"}   mono />
-        <MetricCard label="年化報酬"     value={pct(m.annualized_ret)} trend={m.annualized_ret>0?"positive":"negative"} mono />
-        <MetricCard label="Sharpe Ratio" value={n(m.sharpe_ratio)}    trend={m.sharpe_ratio>0?"positive":m.sharpe_ratio<0?"negative":"neutral"} mono />
-        <MetricCard label="Calmar Ratio" value={n(m.calmar_ratio)}    trend={m.calmar_ratio>1?"positive":"neutral"}  mono />
-        <MetricCard label="最大回撤"     value={pct(m.max_drawdown)}   trend="negative" mono />
-        <MetricCard label="勝率"         value={pct(m.win_rate)}       trend={m.win_rate>0.5?"positive":"negative"}  mono />
-        <MetricCard label="換手率"       value={pct(m.turnover_rate)}  trend="neutral" mono />
+        <MetricCard label="策略總報酬"   value={pct(m.total_return)}   trend={m.total_return>0?"positive":"negative"} mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="Buy & Hold"  value={pct(m.bh_return)}      trend={m.bh_return>0?"positive":"negative"}   mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="年化報酬"     value={pct(m.annualized_ret)} trend={m.annualized_ret>0?"positive":"negative"} mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="Sharpe Ratio" value={n(m.sharpe_ratio)}    trend={m.sharpe_ratio>0?"positive":m.sharpe_ratio<0?"negative":"neutral"} mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="Calmar Ratio" value={n(m.calmar_ratio)}    trend={m.calmar_ratio>1?"positive":"neutral"}  mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="最大回撤"     value={pct(m.max_drawdown)}   trend="negative" mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="勝率"         value={pct(m.win_rate)}       trend={m.win_rate>0.5?"positive":"negative"}  mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
+        <MetricCard label="換手率"       value={pct(m.turnover_rate)}  trend="neutral" mono positiveColor={UP_COLOR} negativeColor={DOWN_COLOR} neutralColor={NEUTRAL_COLOR} />
       </div>
 
       {/* Equity curve */}
@@ -87,8 +96,8 @@ export default function BacktestPage() {
           <ComposedChart data={combined} margin={{top:4,right:8,bottom:0,left:-15}}>
             <defs>
               <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.15}/>
-                <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                <stop offset="5%" stopColor={UP_COLOR} stopOpacity={0.15}/>
+                <stop offset="95%" stopColor={UP_COLOR} stopOpacity={0}/>
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
@@ -97,7 +106,7 @@ export default function BacktestPage() {
             <Tooltip content={<T/>}/>
             <Legend wrapperStyle={{fontSize:11,color:"#64748b"}}/>
             <ReferenceLine y={1} stroke="rgba(255,255,255,0.08)" strokeDasharray="4 4"/>
-            <Area type="monotone" dataKey="strategy" name="策略" stroke="#6366f1" fill="url(#sg)" strokeWidth={2} dot={false}/>
+            <Area type="monotone" dataKey="strategy" name="策略" stroke={UP_COLOR} fill="url(#sg)" strokeWidth={2} dot={false}/>
             <Line type="monotone" dataKey="bh" name="買入持有" stroke="#374151" strokeWidth={1.5} dot={false} strokeDasharray="4 4"/>
           </ComposedChart>
         </ResponsiveContainer>
@@ -111,8 +120,8 @@ export default function BacktestPage() {
             <AreaChart data={dd} margin={{top:4,right:8,bottom:0,left:-15}}>
               <defs>
                 <linearGradient id="dg" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#f87171" stopOpacity={0.3}/>
-                  <stop offset="95%" stopColor="#f87171" stopOpacity={0}/>
+                  <stop offset="5%" stopColor={DOWN_COLOR} stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor={DOWN_COLOR} stopOpacity={0}/>
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
@@ -120,7 +129,7 @@ export default function BacktestPage() {
               <YAxis {...axStyle} tickFormatter={v=>`${v.toFixed(1)}%`}/>
               <Tooltip content={<T/>}/>
               <ReferenceLine y={0} stroke="rgba(255,255,255,0.06)"/>
-              <Area type="monotone" dataKey="value" name="回撤%" stroke="#f87171" fill="url(#dg)" strokeWidth={1.5} dot={false}/>
+              <Area type="monotone" dataKey="value" name="回撤%" stroke={DOWN_COLOR} fill="url(#dg)" strokeWidth={1.5} dot={false}/>
             </AreaChart>
           </ResponsiveContainer>
         </CardBox>
@@ -135,7 +144,7 @@ export default function BacktestPage() {
               <Tooltip content={<T/>}/>
               <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)"/>
               <Bar dataKey="alpha" name="超額%">
-                {alphaData.map((d,i)=><Cell key={i} fill={d.alpha>=0?"#34d399":"#f87171"} opacity={0.7}/>)}
+                {alphaData.map((d,i)=><Cell key={i} fill={d.alpha>=0?UP_COLOR:DOWN_COLOR} opacity={0.7}/>)}
               </Bar>
             </ComposedChart>
           </ResponsiveContainer>

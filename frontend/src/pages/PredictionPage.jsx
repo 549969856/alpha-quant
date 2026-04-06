@@ -1,12 +1,16 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import { TrendingUp, TrendingDown, Minus, AlertTriangle, ShieldAlert } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucide-react";
+
+const UP_COLOR = "#f87171";
+const DOWN_COLOR = "#34d399";
+const NEUTRAL_COLOR = "#94a3b8";
 
 const SIG = {
-  LONG:    { label:"做多 LONG",  Icon:TrendingUp,   color:"#34d399", bg:"rgba(52,211,153,0.08)", border:"rgba(52,211,153,0.25)" },
-  SHORT:   { label:"做空 SHORT", Icon:TrendingDown, color:"#f87171", bg:"rgba(248,113,113,0.08)",border:"rgba(248,113,113,0.25)" },
-  NEUTRAL: { label:"觀望 NEUTRAL",Icon:Minus,       color:"#94a3b8", bg:"rgba(148,163,184,0.06)",border:"rgba(148,163,184,0.15)" },
+  LONG:    { label:"做多 LONG",  Icon:TrendingUp,   color:UP_COLOR, bg:"rgba(248,113,113,0.08)", border:"rgba(248,113,113,0.25)" },
+  SHORT:   { label:"做空 SHORT", Icon:TrendingDown, color:DOWN_COLOR, bg:"rgba(52,211,153,0.08)",border:"rgba(52,211,153,0.25)" },
+  NEUTRAL: { label:"觀望 NEUTRAL",Icon:Minus,       color:NEUTRAL_COLOR, bg:"rgba(148,163,184,0.06)",border:"rgba(148,163,184,0.15)" },
 };
 
 function ProbBar({label, value, color, isMax}) {
@@ -57,9 +61,9 @@ export default function PredictionPage() {
   const {Icon} = cfg;
   const maxP = Math.max(pred.prob_long,pred.prob_short,pred.prob_neutral);
 
-  const rsiColor = pred.rsi_14>70?"#f59e0b":pred.rsi_14<30?"#60a5fa":"#34d399";
+  const rsiColor = pred.rsi_14>70?UP_COLOR:pred.rsi_14<30?DOWN_COLOR:NEUTRAL_COLOR;
   const rsiNote  = pred.rsi_14>70?"⚠ 超買":pred.rsi_14<30?"⚠ 超賣":"✓ 中性";
-  const riskLevel= pred.vol_ann>40?"高風險 🔴":pred.vol_ann>25?"中風險 🟡":"低風險 🟢";
+  const riskLevel= pred.vol_ann>40?"高風險":pred.vol_ann>25?"中風險":"低風險";
 
   return (
     <div style={{maxWidth:640}}>
@@ -94,9 +98,9 @@ export default function PredictionPage() {
       {/* Probability breakdown */}
       <div className="card" style={{padding:24,marginBottom:12}}>
         <p style={{fontSize:11,color:"#475569",textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:600,marginBottom:16}}>機率分解</p>
-        <ProbBar label="🟢 做多 LONG"    value={pred.prob_long}    color="#34d399" isMax={pred.prob_long===maxP}/>
-        <ProbBar label="⚪ 觀望 NEUTRAL"  value={pred.prob_neutral} color="#94a3b8" isMax={pred.prob_neutral===maxP}/>
-        <ProbBar label="🔴 做空 SHORT"   value={pred.prob_short}   color="#f87171" isMax={pred.prob_short===maxP}/>
+        <ProbBar label="🔴 做多 LONG"    value={pred.prob_long}    color={UP_COLOR} isMax={pred.prob_long===maxP}/>
+        <ProbBar label="⚪ 觀望 NEUTRAL"  value={pred.prob_neutral} color={NEUTRAL_COLOR} isMax={pred.prob_neutral===maxP}/>
+        <ProbBar label="🟢 做空 SHORT"   value={pred.prob_short}   color={DOWN_COLOR} isMax={pred.prob_short===maxP}/>
         <p style={{fontSize:10,color:"#374151",marginTop:8}}>* 超過信心門檻的最大方向觸發訊號</p>
       </div>
 
@@ -104,22 +108,22 @@ export default function PredictionPage() {
       <div className="card" style={{padding:24,marginBottom:12}}>
         <p style={{fontSize:11,color:"#475569",textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:600,marginBottom:4}}>市場狀態</p>
         <InfoRow label="RSI(14)" value={`${pred.rsi_14?.toFixed(1)}  ${rsiNote}`} valueStyle={{color:rsiColor}}/>
-        <InfoRow label="年化波動率" value={`${pred.vol_ann?.toFixed(1)}%  (${riskLevel})`} valueStyle={{color:pred.vol_ann>40?"#f87171":pred.vol_ann>25?"#f59e0b":"#34d399"}}/>
-        <InfoRow label="今日超額報酬" value={`${pred.excess_ret>0?"+":""}${pred.excess_ret?.toFixed(3)}%`} valueStyle={{color:pred.excess_ret>=0?"#34d399":"#f87171"}}/>
+        <InfoRow label="年化波動率" value={`${pred.vol_ann?.toFixed(1)}%  (${riskLevel})`} valueStyle={{color:pred.vol_ann>40?UP_COLOR:pred.vol_ann>25?"#f59e0b":DOWN_COLOR}}/>
+        <InfoRow label="今日超額報酬" value={`${pred.excess_ret>0?"+":""}${pred.excess_ret?.toFixed(3)}%`} valueStyle={{color:pred.excess_ret>=0?UP_COLOR:DOWN_COLOR}}/>
       </div>
 
       {/* Risk management */}
       <div className="card" style={{padding:24,marginBottom:16}}>
         <p style={{fontSize:11,color:"#475569",textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:600,marginBottom:16}}>風險管理建議（2σ / 3σ ATR）</p>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
-          <div style={{background:"rgba(248,113,113,0.06)",border:"1px solid rgba(248,113,113,0.15)",borderRadius:10,padding:"16px 20px",textAlign:"center"}}>
-            <p style={{fontSize:10,color:"#f87171",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>止損線</p>
-            <p style={{fontSize:26,fontWeight:900,color:"#f87171",fontFamily:"'JetBrains Mono',monospace"}}>-{pred.stop_loss_pct?.toFixed(2)}%</p>
+          <div style={{background:"rgba(52,211,153,0.06)",border:"1px solid rgba(52,211,153,0.15)",borderRadius:10,padding:"16px 20px",textAlign:"center"}}>
+            <p style={{fontSize:10,color:DOWN_COLOR,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>止損線</p>
+            <p style={{fontSize:26,fontWeight:900,color:DOWN_COLOR,fontFamily:"'JetBrains Mono',monospace"}}>-{pred.stop_loss_pct?.toFixed(2)}%</p>
             <p style={{fontSize:10,color:"#475569",marginTop:4}}>低於此點位離場</p>
           </div>
-          <div style={{background:"rgba(52,211,153,0.06)",border:"1px solid rgba(52,211,153,0.15)",borderRadius:10,padding:"16px 20px",textAlign:"center"}}>
-            <p style={{fontSize:10,color:"#34d399",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>目標線</p>
-            <p style={{fontSize:26,fontWeight:900,color:"#34d399",fontFamily:"'JetBrains Mono',monospace"}}>+{pred.target_pct?.toFixed(2)}%</p>
+          <div style={{background:"rgba(248,113,113,0.06)",border:"1px solid rgba(248,113,113,0.15)",borderRadius:10,padding:"16px 20px",textAlign:"center"}}>
+            <p style={{fontSize:10,color:UP_COLOR,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>目標線</p>
+            <p style={{fontSize:26,fontWeight:900,color:UP_COLOR,fontFamily:"'JetBrains Mono',monospace"}}>+{pred.target_pct?.toFixed(2)}%</p>
             <p style={{fontSize:10,color:"#475569",marginTop:4}}>達到可考慮減碼</p>
           </div>
         </div>

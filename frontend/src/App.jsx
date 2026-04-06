@@ -33,6 +33,7 @@ export default function App() {
           }>
             <Route index element={<DashboardPage />} />
             <Route path="experiment/new"     element={<ExperimentPage />} />
+            <Route path="experiment/:id"     element={<ExperimentPage />} />
             <Route path="run/:id/status"     element={<TrainingPage />} />
             <Route path="run/:id/backtest"   element={<BacktestPage />} />
             <Route path="run/:id/prediction" element={<PredictionPage />} />

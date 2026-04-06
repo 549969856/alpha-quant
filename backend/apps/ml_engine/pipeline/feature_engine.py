@@ -178,14 +178,15 @@ class BacktestEngine:
             if action == 2 and p[2] > self.thr: target =  1
             elif action == 0 and p[0] > self.thr: target = -1
 
+            simple_ret = float(np.exp(r) - 1.0)
             cost  = self.cost if target != pos else 0.0
             pos   = target
-            ret   = pos * float(r) - cost
+            ret   = pos * simple_ret - cost
             daily.append(ret)
             pos_log.append({"date": str(dates[i]), "position": pos})
 
             eq_new = equity[-1] * (1 + ret)
-            bh_new = bh[-1] * (1 + float(r))
+            bh_new = bh[-1] * (1 + simple_ret)
             equity.append(eq_new)
             bh.append(bh_new)
 

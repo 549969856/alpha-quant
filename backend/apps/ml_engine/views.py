@@ -68,7 +68,10 @@ class ExperimentViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, pk=None, *args, **kwargs):
         from apps.ml_engine.models import Experiment
         exp = Experiment.objects.get(id=pk, user=request.user)
-        for field in ("name","description","feature_ids","status"):
+        for field in (
+            "name", "description", "ticker", "benchmark",
+            "date_start", "date_end", "feature_ids", "status",
+        ):
             if field in request.data:
                 setattr(exp, field, request.data[field])
         exp.save()
@@ -78,11 +81,24 @@ class ExperimentViewSet(viewsets.ModelViewSet):
         from apps.ml_engine.models import Experiment
         exp = Experiment.objects.get(id=pk, user=request.user)
         runs = list(exp.runs.all().order_by("-started_at").values(
-            "id","status","epochs_done","started_at","finished_at"))
+            "id","status","epochs_done","started_at","finished_at","model_arch__display_name"))
         for r in runs:
             r["id"] = str(r["id"])
-        return Response({"id":str(exp.id),"name":exp.name,"ticker":exp.ticker,
-                         "benchmark":exp.benchmark,"status":exp.status,"runs":runs})
+            r["model_name"] = r.pop("model_arch__display_name")
+        return Response({
+            "id": str(exp.id),
+            "name": exp.name,
+            "description": exp.description,
+            "ticker": exp.ticker,
+            "benchmark": exp.benchmark,
+            "date_start": exp.date_start,
+            "date_end": exp.date_end,
+            "status": exp.status,
+            "feature_ids": exp.feature_ids,
+            "created_at": exp.created_at,
+            "updated_at": exp.updated_at,
+            "runs": runs,
+        })
 
 
 # ── Launch Training ─────────────────────────────────────────────────
