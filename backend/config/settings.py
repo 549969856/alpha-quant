@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import timedelta
 import os
+from celery.schedules import crontab
 
 try:
     from decouple import config
@@ -103,6 +104,12 @@ CELERY_TASK_ROUTES = {
     "apps.market_data.tasks.*": {"queue": "data_fetch"},
     "apps.ml_engine.tasks.*":   {"queue": "training"},
     "apps.backtest.tasks.*":    {"queue": "training"},
+}
+CELERY_BEAT_SCHEDULE = {
+    "evaluate-live-feedback-daily": {
+        "task": "evaluate_all_live_feedback",
+        "schedule": crontab(hour=18, minute=10),
+    },
 }
 
 # ── REST Framework ─────────────────────────────────────────────────

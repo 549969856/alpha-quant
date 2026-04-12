@@ -51,6 +51,11 @@ class Experiment(models.Model):
     benchmark   = models.CharField(max_length=20, default="0050.TW")
     date_start  = models.DateField()
     date_end    = models.DateField()
+    random_seed = models.IntegerField(default=42)
+    split_config = models.JSONField(
+        default=dict,
+        help_text='{"train": 70, "val": 15, "test": 15}',
+    )
     status      = models.CharField(max_length=16, choices=STATUS, default="draft")
     # Selected features
     feature_preset  = models.ForeignKey(
@@ -86,6 +91,7 @@ class TrainingRun(models.Model):
 
     # Training metadata
     train_size   = models.IntegerField(null=True)
+    val_size     = models.IntegerField(null=True)
     test_size    = models.IntegerField(null=True)
     epochs_done  = models.IntegerField(default=0)
     loss_history = models.JSONField(default=list)  # [{epoch, loss}]
@@ -97,6 +103,113 @@ class TrainingRun(models.Model):
     class Meta:
         db_table = "training_runs"
         ordering = ["-started_at"]
+
+
+class LiveDeployment(models.Model):
+    """
+    Production-facing deployment created from a successful research experiment.
+    Stores a snapshot of the model setup so future live runs remain reproducible.
+    """
+    STATUS = [
+        ("draft", "Draft"),
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("ready", "Ready"),
+        ("failed", "Failed"),
+    ]
+
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user           = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="live_deployments")
+    source_experiment = models.ForeignKey(
+        Experiment, null=True, blank=True, on_delete=models.SET_NULL, related_name="live_deployments"
+    )
+    source_run     = models.ForeignKey(
+        "TrainingRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="live_deployments"
+    )
+    model_arch     = models.ForeignKey(ModelRegistry, on_delete=models.PROTECT)
+    name           = models.CharField(max_length=128)
+    description    = models.TextField(blank=True)
+    ticker         = models.CharField(max_length=20)
+    benchmark      = models.CharField(max_length=20, default="0050.TW")
+    date_start     = models.DateField()
+    date_end       = models.DateField()
+    status         = models.CharField(max_length=16, choices=STATUS, default="draft")
+    feature_ids    = models.JSONField(default=list)
+    hparams        = models.JSONField(default=dict)
+    random_seed    = models.IntegerField(default=42)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "live_deployments"
+        ordering = ["-updated_at"]
+
+
+class LiveRun(models.Model):
+    """
+    One live training + next-day recommendation job for a deployment.
+    """
+    STATUS = [
+        ("pending", "Pending"),
+        ("training", "Training"),
+        ("done", "Done"),
+        ("failed", "Failed"),
+    ]
+    SIGNAL_CHOICES = [("LONG", "Long"), ("SHORT", "Short"), ("NEUTRAL", "Neutral")]
+
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deployment      = models.ForeignKey(LiveDeployment, on_delete=models.CASCADE, related_name="runs")
+    status          = models.CharField(max_length=16, choices=STATUS, default="pending")
+    celery_task_id  = models.CharField(max_length=64, blank=True)
+    train_size      = models.IntegerField(null=True)
+    epochs_done     = models.IntegerField(default=0)
+    loss_history    = models.JSONField(default=list)
+    training_window_start = models.DateField(null=True)
+    training_window_end   = models.DateField(null=True)
+    artifact_path   = models.CharField(max_length=512, blank=True)
+    prediction_date = models.DateField(null=True, db_index=True)
+    target_date     = models.DateField(null=True)
+    signal          = models.CharField(max_length=8, choices=SIGNAL_CHOICES, blank=True)
+    prob_long       = models.FloatField(null=True)
+    prob_short      = models.FloatField(null=True)
+    prob_neutral    = models.FloatField(null=True)
+    confidence      = models.FloatField(null=True)
+    rsi_14          = models.FloatField(null=True)
+    vol_ann         = models.FloatField(null=True)
+    stop_loss_pct   = models.FloatField(null=True)
+    target_pct      = models.FloatField(null=True)
+    started_at      = models.DateTimeField(null=True)
+    finished_at     = models.DateTimeField(null=True)
+    error_msg       = models.TextField(blank=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "live_runs"
+        ordering = ["-created_at"]
+
+
+class LivePredictionFeedback(models.Model):
+    """
+    Post-trade review record for one live prediction once actual market data is available.
+    """
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deployment     = models.ForeignKey(LiveDeployment, on_delete=models.CASCADE, related_name="feedback_items")
+    live_run       = models.OneToOneField(LiveRun, on_delete=models.CASCADE, related_name="feedback")
+    prediction_date = models.DateField(db_index=True)
+    target_date    = models.DateField(db_index=True)
+    predicted_signal = models.CharField(max_length=8)
+    actual_return  = models.FloatField()
+    predicted_return = models.FloatField(default=0.0)
+    realized_pnl   = models.FloatField(default=0.0)
+    was_correct    = models.BooleanField(default=False)
+    hit_rate       = models.FloatField(default=0.0)
+    cumulative_pnl = models.FloatField(default=0.0)
+    alpha_drift    = models.FloatField(default=0.0)
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "live_prediction_feedback"
+        ordering = ["-target_date"]
 
 
 class ModelArtifact(models.Model):

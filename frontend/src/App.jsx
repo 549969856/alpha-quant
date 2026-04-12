@@ -11,6 +11,8 @@ import ExperimentPage   from "./pages/ExperimentPage";
 import TrainingPage     from "./pages/TrainingPage";
 import BacktestPage     from "./pages/BacktestPage";
 import PredictionPage   from "./pages/PredictionPage";
+import LiveTradingPage  from "./pages/LiveTradingPage";
+import LiveRunPage      from "./pages/LiveRunPage";
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
@@ -37,6 +39,8 @@ export default function App() {
             <Route path="run/:id/status"     element={<TrainingPage />} />
             <Route path="run/:id/backtest"   element={<BacktestPage />} />
             <Route path="run/:id/prediction" element={<PredictionPage />} />
+            <Route path="live/:id"           element={<LiveTradingPage />} />
+            <Route path="live-run/:id/status" element={<LiveRunPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

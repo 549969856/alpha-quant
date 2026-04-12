@@ -10,6 +10,8 @@ from apps.market_data.views import FeatureDefinitionViewSet, FeaturePresetViewSe
 from apps.ml_engine.views import (
     ModelRegistryView, ExperimentViewSet, LaunchTrainingView,
     TrainingRunStatusView, BacktestResultView, PredictionView, HealthCheckView,
+    LiveDeploymentListCreateView, LiveDeploymentDetailView, LaunchLiveRunView,
+    LiveRunStatusView, LivePredictionView, LiveFeedbackView, RetrainExperimentView,
 )
 from apps.backtest.views import WalkForwardView, MonteCarloView, ComparisonView
 
@@ -28,10 +30,17 @@ urlpatterns = [
     path("api/models/",             ModelRegistryView.as_view()),
     path("api/",                    include(router.urls)),
     path("api/experiments/<uuid:exp_id>/train/",   LaunchTrainingView.as_view()),
+    path("api/experiments/<uuid:exp_id>/retrain/", RetrainExperimentView.as_view()),
     path("api/experiments/<uuid:exp_id>/compare/", ComparisonView.as_view()),
     path("api/runs/<uuid:run_id>/status/",        TrainingRunStatusView.as_view()),
     path("api/runs/<uuid:run_id>/backtest/",      BacktestResultView.as_view()),
     path("api/runs/<uuid:run_id>/prediction/",    PredictionView.as_view()),
+    path("api/live-deployments/", LiveDeploymentListCreateView.as_view()),
+    path("api/live-deployments/<uuid:deployment_id>/", LiveDeploymentDetailView.as_view()),
+    path("api/live-deployments/<uuid:deployment_id>/run/", LaunchLiveRunView.as_view()),
+    path("api/live-deployments/<uuid:deployment_id>/feedback/", LiveFeedbackView.as_view()),
+    path("api/live-runs/<uuid:live_run_id>/status/", LiveRunStatusView.as_view()),
+    path("api/live-runs/<uuid:live_run_id>/prediction/", LivePredictionView.as_view()),
     path("api/runs/<uuid:run_id>/walk-forward/",  WalkForwardView.as_view()),
     path("api/runs/<uuid:run_id>/monte-carlo/",   MonteCarloView.as_view()),
     path("api/health/",   HealthCheckView.as_view()),

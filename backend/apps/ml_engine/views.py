@@ -1,50 +1,99 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import permissions, status, viewsets, filters
-from django_filters.rest_framework import DjangoFilterBackend
+from datetime import timedelta
+
+from django.db import connections
 from django.utils import timezone
+from rest_framework import filters, permissions, status, viewsets
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from django_filters.rest_framework import DjangoFilterBackend
 
 
-# ── Model Registry ──────────────────────────────────────────────────
+def _serialize_run_summary(run):
+    data = {
+        "id": str(run.id),
+        "status": run.status,
+        "epochs_done": run.epochs_done,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "model_name": getattr(run.model_arch, "display_name", None),
+        "model_arch_id": str(run.model_arch_id) if getattr(run, "model_arch_id", None) else None,
+        "hparams": run.hparams,
+    }
+    backtest = getattr(run, "backtest", None)
+    if backtest:
+        data["backtest"] = {
+            "total_return": backtest.total_return,
+            "sharpe_ratio": backtest.sharpe_ratio,
+            "max_drawdown": backtest.max_drawdown,
+        }
+    return data
+
+
+def _yesterday():
+    return timezone.localdate() - timedelta(days=1)
+
+
 class ModelRegistryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request):
         from apps.ml_engine.models import ModelRegistry
+
         data = list(ModelRegistry.objects.filter(is_active=True).values(
-            "id","arch","display_name","description","default_hparams"))
-        for d in data:
-            d["id"] = str(d["id"])
+            "id",
+            "arch",
+            "display_name",
+            "description",
+            "default_hparams",
+        ))
+        for item in data:
+            item["id"] = str(item["id"])
         return Response(data)
 
 
-# ── Experiment ViewSet ───────────────────────────────────────────────
 class ExperimentViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
-    filter_backends    = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields   = ["status"]
-    ordering_fields    = ["created_at"]
-    ordering           = ["-created_at"]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ["status"]
+    ordering_fields = ["created_at"]
+    ordering = ["-created_at"]
 
     def get_queryset(self):
         from apps.ml_engine.models import Experiment
-        return Experiment.objects.filter(user=self.request.user).prefetch_related("runs")
+
+        return Experiment.objects.filter(user=self.request.user).prefetch_related(
+            "runs__model_arch",
+            "runs__backtest",
+        )
 
     def list(self, request, *args, **kwargs):
         qs = self.get_queryset()
         data = []
         for exp in qs:
-            runs = []
-            for r in exp.runs.all().order_by("-started_at")[:1]:
-                runs.append({"id":str(r.id),"status":r.status,"epochs_done":r.epochs_done})
+            runs = list(exp.runs.all().order_by("-started_at"))
+            latest_run = runs[0] if runs else None
+            latest_done = next((r for r in runs if r.status == "done" and hasattr(r, "backtest")), None)
             data.append({
-                "id":         str(exp.id),
-                "name":       exp.name,
-                "description":exp.description,
-                "ticker":     exp.ticker,
-                "benchmark":  exp.benchmark,
-                "status":     exp.status,
-                "feature_ids":exp.feature_ids,
-                "runs":       runs,
+                "id": str(exp.id),
+                "name": exp.name,
+                "description": exp.description,
+                "ticker": exp.ticker,
+                "benchmark": exp.benchmark,
+                "date_start": exp.date_start,
+                "date_end": exp.date_end,
+                "status": exp.status,
+                "feature_ids": exp.feature_ids,
+                "random_seed": exp.random_seed,
+                "split_config": exp.split_config or {"train": 70, "val": 15, "test": 15},
+                "runs": [_serialize_run_summary(latest_run)] if latest_run else [],
+                "latest_backtest": (
+                    {
+                        "total_return": latest_done.backtest.total_return,
+                        "sharpe_ratio": latest_done.backtest.sharpe_ratio,
+                        "max_drawdown": latest_done.backtest.max_drawdown,
+                        "run_id": str(latest_done.id),
+                    } if latest_done else None
+                ),
                 "created_at": exp.created_at,
                 "updated_at": exp.updated_at,
             })
@@ -52,25 +101,37 @@ class ExperimentViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         from apps.ml_engine.models import Experiment
+
         d = request.data
         exp = Experiment.objects.create(
             user=request.user,
-            name=d.get("name",""),
-            description=d.get("description",""),
-            ticker=d.get("ticker","2603.TW"),
-            benchmark=d.get("benchmark","0050.TW"),
-            date_start=d.get("date_start","2020-01-01"),
-            date_end=d.get("date_end","2026-03-27"),
-            feature_ids=d.get("feature_ids",[]),
+            name=d.get("name", ""),
+            description=d.get("description", ""),
+            ticker=d.get("ticker", "2603.TW"),
+            benchmark=d.get("benchmark", "0050.TW"),
+            date_start=d.get("date_start", "2020-01-01"),
+            date_end=d.get("date_end", _yesterday()),
+            random_seed=int(d.get("random_seed", 42)),
+            split_config=d.get("split_config") or {"train": 70, "val": 15, "test": 15},
+            feature_ids=d.get("feature_ids", []),
         )
-        return Response({"id":str(exp.id),"name":exp.name,"status":exp.status}, status=201)
+        return Response({"id": str(exp.id), "name": exp.name, "status": exp.status}, status=201)
 
     def partial_update(self, request, pk=None, *args, **kwargs):
         from apps.ml_engine.models import Experiment
+
         exp = Experiment.objects.get(id=pk, user=request.user)
         for field in (
-            "name", "description", "ticker", "benchmark",
-            "date_start", "date_end", "feature_ids", "status",
+            "name",
+            "description",
+            "ticker",
+            "benchmark",
+            "date_start",
+            "date_end",
+            "feature_ids",
+            "status",
+            "random_seed",
+            "split_config",
         ):
             if field in request.data:
                 setattr(exp, field, request.data[field])
@@ -79,12 +140,9 @@ class ExperimentViewSet(viewsets.ModelViewSet):
 
     def retrieve(self, request, pk=None, *args, **kwargs):
         from apps.ml_engine.models import Experiment
+
         exp = Experiment.objects.get(id=pk, user=request.user)
-        runs = list(exp.runs.all().order_by("-started_at").values(
-            "id","status","epochs_done","started_at","finished_at","model_arch__display_name"))
-        for r in runs:
-            r["id"] = str(r["id"])
-            r["model_name"] = r.pop("model_arch__display_name")
+        runs = [_serialize_run_summary(run) for run in exp.runs.all().order_by("-started_at").select_related("model_arch").prefetch_related("backtest")]
         return Response({
             "id": str(exp.id),
             "name": exp.name,
@@ -95,26 +153,28 @@ class ExperimentViewSet(viewsets.ModelViewSet):
             "date_end": exp.date_end,
             "status": exp.status,
             "feature_ids": exp.feature_ids,
+            "random_seed": exp.random_seed,
+            "split_config": exp.split_config or {"train": 70, "val": 15, "test": 15},
             "created_at": exp.created_at,
             "updated_at": exp.updated_at,
             "runs": runs,
         })
 
 
-# ── Launch Training ─────────────────────────────────────────────────
 class LaunchTrainingView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, exp_id):
-        from apps.ml_engine.models import Experiment, TrainingRun, ModelRegistry
+        from apps.ml_engine.models import Experiment, ModelRegistry, TrainingRun
         from apps.ml_engine.tasks import run_training
 
-        exp      = Experiment.objects.get(id=exp_id, user=request.user)
-        arch_id  = request.data.get("model_arch_id")
-        hparams  = request.data.get("hparams", {})
-        arch     = ModelRegistry.objects.get(id=arch_id)
-        run      = TrainingRun.objects.create(experiment=exp, model_arch=arch, hparams=hparams)
-        exp.status = "queued"; exp.save(update_fields=["status"])
+        exp = Experiment.objects.get(id=exp_id, user=request.user)
+        arch_id = request.data.get("model_arch_id")
+        hparams = request.data.get("hparams", {})
+        arch = ModelRegistry.objects.get(id=arch_id)
+        run = TrainingRun.objects.create(experiment=exp, model_arch=arch, hparams=hparams)
+        exp.status = "queued"
+        exp.save(update_fields=["status"])
 
         task = run_training.apply_async(args=[str(run.id)], queue="training")
         run.celery_task_id = task.id
@@ -122,24 +182,108 @@ class LaunchTrainingView(APIView):
         return Response({"run_id": str(run.id), "task_id": task.id}, status=202)
 
 
-# ── Training Run Status ─────────────────────────────────────────────
+class RetrainExperimentView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, exp_id):
+        from apps.ml_engine.models import Experiment, ModelRegistry, TrainingRun
+        from apps.ml_engine.tasks import run_training
+
+        exp = Experiment.objects.prefetch_related("runs__model_arch").get(id=exp_id, user=request.user)
+        payload = request.data
+        model_arch_id = payload.get("model_arch_id")
+        hparams = payload.get("hparams") or {}
+        feature_ids = payload.get("feature_ids")
+        fork_name = payload.get("fork_name")
+
+        if not model_arch_id:
+            latest_run = exp.runs.order_by("-started_at", "-id").first()
+            if latest_run:
+                model_arch_id = str(latest_run.model_arch_id)
+                if not hparams:
+                    hparams = latest_run.hparams
+
+        if not model_arch_id:
+            return Response({"error": "model_arch_id is required"}, status=400)
+
+        model_arch = ModelRegistry.objects.get(id=model_arch_id)
+        experiment_fields = {
+            "name": payload.get("name", exp.name),
+            "description": payload.get("description", exp.description),
+            "ticker": payload.get("ticker", exp.ticker),
+            "benchmark": payload.get("benchmark", exp.benchmark),
+            "date_start": payload.get("date_start", exp.date_start),
+            "date_end": payload.get("date_end", exp.date_end),
+            "random_seed": int(payload.get("random_seed", exp.random_seed)),
+            "split_config": payload.get("split_config") or exp.split_config or {"train": 70, "val": 15, "test": 15},
+            "feature_ids": feature_ids if feature_ids is not None else exp.feature_ids,
+        }
+
+        if exp.status == "done":
+            if not fork_name:
+                return Response({"error": "fork_name is required for completed experiments"}, status=400)
+            target_exp = Experiment.objects.create(
+                user=request.user,
+                name=fork_name,
+                description=experiment_fields["description"],
+                ticker=experiment_fields["ticker"],
+                benchmark=experiment_fields["benchmark"],
+                date_start=experiment_fields["date_start"],
+                date_end=experiment_fields["date_end"],
+                random_seed=experiment_fields["random_seed"],
+                split_config=experiment_fields["split_config"],
+                feature_ids=experiment_fields["feature_ids"],
+                status="queued",
+            )
+            action = "forked"
+        else:
+            target_exp = exp
+            for field, value in experiment_fields.items():
+                setattr(target_exp, field, value)
+            target_exp.status = "queued"
+            target_exp.save()
+            action = "retrained"
+
+        run = TrainingRun.objects.create(
+            experiment=target_exp,
+            model_arch=model_arch,
+            hparams=hparams,
+            status="pending",
+        )
+        task = run_training.apply_async(args=[str(run.id)], queue="training")
+        run.celery_task_id = task.id
+        run.save(update_fields=["celery_task_id"])
+
+        return Response({
+            "action": action,
+            "experiment_id": str(target_exp.id),
+            "run_id": str(run.id),
+            "task_id": task.id,
+        }, status=202)
+
+
 class TrainingRunStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, run_id):
         from apps.ml_engine.models import TrainingRun
+
         run = TrainingRun.objects.select_related("experiment", "model_arch").get(
-            id=run_id, experiment__user=request.user)
-        now = timezone.now()
+            id=run_id,
+            experiment__user=request.user,
+        )
         return Response({
-            "id":           str(run.id),
-            "status":       run.status,
-            "epochs_done":  run.epochs_done,
+            "id": str(run.id),
+            "status": run.status,
+            "epochs_done": run.epochs_done,
             "loss_history": run.loss_history,
-            "error_msg":    run.error_msg,
-            "started_at":   run.started_at,
-            "finished_at":  run.finished_at,
+            "error_msg": run.error_msg,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
             "celery_task_id": run.celery_task_id,
+            "train_size": run.train_size,
+            "val_size": run.val_size,
+            "test_size": run.test_size,
             "hparams": run.hparams,
             "model_arch": {
                 "id": str(run.model_arch_id),
@@ -149,17 +293,19 @@ class TrainingRunStatusView(APIView):
             "experiment": {
                 "id": str(run.experiment_id),
                 "status": run.experiment.status,
+                "split_config": run.experiment.split_config,
+                "random_seed": run.experiment.random_seed,
             },
-            "server_time": now,
+            "server_time": timezone.now(),
         })
 
 
-# ── Backtest Result ─────────────────────────────────────────────────
 class BacktestResultView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, run_id):
-        from apps.ml_engine.models import TrainingRun, BacktestResult
+        from apps.ml_engine.models import BacktestResult, TrainingRun
+
         run = TrainingRun.objects.get(id=run_id, experiment__user=request.user)
         try:
             bt = BacktestResult.objects.get(run=run)
@@ -167,64 +313,323 @@ class BacktestResultView(APIView):
             return Response({"status": "not_ready"}, status=202)
         return Response({
             "metrics": {
-                "total_return":   bt.total_return,
-                "bh_return":      bt.bh_return,
+                "total_return": bt.total_return,
+                "bh_return": bt.bh_return,
                 "annualized_ret": bt.annualized_ret,
-                "sharpe_ratio":   bt.sharpe_ratio,
-                "calmar_ratio":   bt.calmar_ratio,
-                "max_drawdown":   bt.max_drawdown,
-                "win_rate":       bt.win_rate,
-                "turnover_rate":  bt.turnover_rate,
+                "sharpe_ratio": bt.sharpe_ratio,
+                "calmar_ratio": bt.calmar_ratio,
+                "max_drawdown": bt.max_drawdown,
+                "win_rate": bt.win_rate,
+                "turnover_rate": bt.turnover_rate,
             },
-            "equity_curve":   bt.equity_curve,
-            "bh_curve":       bt.bh_curve,
+            "equity_curve": bt.equity_curve,
+            "bh_curve": bt.bh_curve,
             "drawdown_curve": bt.drawdown_curve,
-            "position_log":   bt.position_log,
+            "position_log": bt.position_log,
         })
 
 
-# ── Prediction ──────────────────────────────────────────────────────
 class PredictionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, run_id):
-        from apps.ml_engine.models import TrainingRun, PredictionRecord
-        run  = TrainingRun.objects.get(id=run_id, experiment__user=request.user)
+        from apps.ml_engine.models import PredictionRecord, TrainingRun
+
+        run = TrainingRun.objects.get(id=run_id, experiment__user=request.user)
         pred = PredictionRecord.objects.filter(run=run).order_by("-prediction_date").first()
         if not pred:
             return Response({"error": "No prediction yet"}, status=404)
         return Response({
-            "signal":          pred.signal,
-            "prob_long":       pred.prob_long,
-            "prob_short":      pred.prob_short,
-            "prob_neutral":    pred.prob_neutral,
-            "confidence":      pred.confidence,
-            "rsi_14":          pred.rsi_14,
-            "vol_ann":         pred.vol_ann,
-            "excess_ret":      0.0,
-            "stop_loss_pct":   pred.stop_loss_pct,
-            "target_pct":      pred.target_pct,
+            "signal": pred.signal,
+            "prob_long": pred.prob_long,
+            "prob_short": pred.prob_short,
+            "prob_neutral": pred.prob_neutral,
+            "confidence": pred.confidence,
+            "rsi_14": pred.rsi_14,
+            "vol_ann": pred.vol_ann,
+            "excess_ret": 0.0,
+            "stop_loss_pct": pred.stop_loss_pct,
+            "target_pct": pred.target_pct,
             "prediction_date": str(pred.prediction_date),
-            "target_date":     str(pred.target_date),
+            "target_date": str(pred.target_date),
         })
 
 
-# ── Health Check ────────────────────────────────────────────────────
+class LiveDeploymentListCreateView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.ml_engine.models import LiveDeployment
+
+        rows = LiveDeployment.objects.filter(user=request.user).select_related("model_arch", "source_experiment").prefetch_related("runs")
+        data = []
+        for deployment in rows:
+            latest_run = deployment.runs.order_by("-created_at").first()
+            data.append({
+                "id": str(deployment.id),
+                "name": deployment.name,
+                "description": deployment.description,
+                "ticker": deployment.ticker,
+                "benchmark": deployment.benchmark,
+                "status": deployment.status,
+                "date_start": deployment.date_start,
+                "date_end": deployment.date_end,
+                "model_arch": {
+                    "id": str(deployment.model_arch_id),
+                    "display_name": deployment.model_arch.display_name,
+                    "arch": deployment.model_arch.arch,
+                },
+                "feature_ids": deployment.feature_ids,
+                "hparams": deployment.hparams,
+                "random_seed": deployment.random_seed,
+                "source_experiment_id": str(deployment.source_experiment_id) if deployment.source_experiment_id else None,
+                "latest_run": (
+                    {
+                        "id": str(latest_run.id),
+                        "status": latest_run.status,
+                        "signal": latest_run.signal,
+                        "prediction_date": latest_run.prediction_date,
+                        "target_date": latest_run.target_date,
+                    } if latest_run else None
+                ),
+                "created_at": deployment.created_at,
+                "updated_at": deployment.updated_at,
+            })
+        return Response(data)
+
+    def post(self, request):
+        from apps.ml_engine.models import Experiment, LiveDeployment
+
+        exp = Experiment.objects.get(id=request.data.get("source_experiment_id"), user=request.user)
+        source_run = exp.runs.filter(status="done").select_related("model_arch").order_by("-finished_at", "-created_at").first()
+        if not source_run:
+            return Response({"error": "Experiment has no completed run to deploy."}, status=400)
+
+        payload = request.data
+        deployment = LiveDeployment.objects.create(
+            user=request.user,
+            source_experiment=exp,
+            source_run=source_run,
+            model_arch=source_run.model_arch,
+            name=payload.get("name") or f"{exp.name} Live",
+            description=payload.get("description", exp.description),
+            ticker=payload.get("ticker", exp.ticker),
+            benchmark=payload.get("benchmark", exp.benchmark),
+            date_start=payload.get("date_start", exp.date_start),
+            date_end=payload.get("date_end", _yesterday()),
+            feature_ids=exp.feature_ids,
+            hparams=source_run.hparams,
+            random_seed=payload.get("random_seed", exp.random_seed),
+            status="draft",
+        )
+        return Response({"id": str(deployment.id), "status": deployment.status}, status=201)
+
+
+class LiveDeploymentDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, deployment_id):
+        from apps.ml_engine.models import LiveDeployment
+
+        deployment = LiveDeployment.objects.select_related("model_arch", "source_experiment", "source_run").get(
+            id=deployment_id,
+            user=request.user,
+        )
+        runs = deployment.runs.order_by("-created_at")
+        latest_run = runs.first()
+        return Response({
+            "id": str(deployment.id),
+            "name": deployment.name,
+            "description": deployment.description,
+            "ticker": deployment.ticker,
+            "benchmark": deployment.benchmark,
+            "status": deployment.status,
+            "date_start": deployment.date_start,
+            "date_end": deployment.date_end,
+            "feature_ids": deployment.feature_ids,
+            "hparams": deployment.hparams,
+            "random_seed": deployment.random_seed,
+            "source_experiment_id": str(deployment.source_experiment_id) if deployment.source_experiment_id else None,
+            "source_run_id": str(deployment.source_run_id) if deployment.source_run_id else None,
+            "model_arch": {
+                "id": str(deployment.model_arch_id),
+                "display_name": deployment.model_arch.display_name,
+                "arch": deployment.model_arch.arch,
+            },
+            "latest_run": (
+                {
+                    "id": str(latest_run.id),
+                    "status": latest_run.status,
+                    "signal": latest_run.signal,
+                    "prediction_date": latest_run.prediction_date,
+                    "target_date": latest_run.target_date,
+                    "confidence": latest_run.confidence,
+                    "prob_long": latest_run.prob_long,
+                    "prob_short": latest_run.prob_short,
+                    "prob_neutral": latest_run.prob_neutral,
+                    "training_window_start": latest_run.training_window_start,
+                    "training_window_end": latest_run.training_window_end,
+                } if latest_run else None
+            ),
+            "runs": [
+                {
+                    "id": str(run.id),
+                    "status": run.status,
+                    "prediction_date": run.prediction_date,
+                    "target_date": run.target_date,
+                    "signal": run.signal,
+                    "confidence": run.confidence,
+                } for run in runs
+            ],
+            "created_at": deployment.created_at,
+            "updated_at": deployment.updated_at,
+        })
+
+    def patch(self, request, deployment_id):
+        from apps.ml_engine.models import LiveDeployment
+
+        deployment = LiveDeployment.objects.get(id=deployment_id, user=request.user)
+        for field in ("name", "description", "ticker", "benchmark", "date_start", "date_end", "random_seed", "status"):
+            if field in request.data:
+                setattr(deployment, field, request.data[field])
+        deployment.save()
+        return Response({"id": str(deployment.id)})
+
+
+class LaunchLiveRunView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, deployment_id):
+        from apps.ml_engine.models import LiveDeployment, LiveRun
+        from apps.ml_engine.tasks import run_live_prediction
+
+        deployment = LiveDeployment.objects.get(id=deployment_id, user=request.user)
+        if "date_start" in request.data:
+            deployment.date_start = request.data["date_start"]
+        if "date_end" in request.data:
+            deployment.date_end = request.data["date_end"]
+        deployment.status = "queued"
+        deployment.save(update_fields=["date_start", "date_end", "status", "updated_at"])
+
+        live_run = LiveRun.objects.create(deployment=deployment, status="pending")
+        task = run_live_prediction.apply_async(args=[str(live_run.id)], queue="training")
+        live_run.celery_task_id = task.id
+        live_run.save(update_fields=["celery_task_id"])
+        return Response({"live_run_id": str(live_run.id), "task_id": task.id}, status=202)
+
+
+class LiveRunStatusView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, live_run_id):
+        from apps.ml_engine.models import LiveRun
+
+        run = LiveRun.objects.select_related("deployment", "deployment__model_arch").get(
+            id=live_run_id,
+            deployment__user=request.user,
+        )
+        return Response({
+            "id": str(run.id),
+            "status": run.status,
+            "epochs_done": run.epochs_done,
+            "loss_history": run.loss_history,
+            "error_msg": run.error_msg,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "celery_task_id": run.celery_task_id,
+            "train_size": run.train_size,
+            "training_window_start": run.training_window_start,
+            "training_window_end": run.training_window_end,
+            "deployment": {
+                "id": str(run.deployment_id),
+                "name": run.deployment.name,
+                "status": run.deployment.status,
+            },
+            "model_arch": {
+                "id": str(run.deployment.model_arch_id),
+                "display_name": run.deployment.model_arch.display_name,
+                "arch": run.deployment.model_arch.arch,
+            },
+            "server_time": timezone.now(),
+        })
+
+
+class LivePredictionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, live_run_id):
+        from apps.ml_engine.models import LiveRun
+
+        run = LiveRun.objects.get(id=live_run_id, deployment__user=request.user)
+        if run.status != "done" or not run.signal:
+            return Response({"status": "not_ready"}, status=202)
+        return Response({
+            "signal": run.signal,
+            "prob_long": run.prob_long,
+            "prob_short": run.prob_short,
+            "prob_neutral": run.prob_neutral,
+            "confidence": run.confidence,
+            "rsi_14": run.rsi_14,
+            "vol_ann": run.vol_ann,
+            "stop_loss_pct": run.stop_loss_pct,
+            "target_pct": run.target_pct,
+            "prediction_date": str(run.prediction_date),
+            "target_date": str(run.target_date),
+            "training_window_start": str(run.training_window_start),
+            "training_window_end": str(run.training_window_end),
+            "headline": (
+                f"基於 {run.training_window_start} 到 {run.training_window_end} 的數據，"
+                f"明日模型操作建議為：{run.signal}"
+            ),
+        })
+
+
+class LiveFeedbackView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, deployment_id):
+        from apps.ml_engine.models import LivePredictionFeedback, LiveDeployment
+
+        deployment = LiveDeployment.objects.get(id=deployment_id, user=request.user)
+        rows = list(
+            LivePredictionFeedback.objects.filter(deployment=deployment).order_by("target_date").values(
+                "prediction_date",
+                "target_date",
+                "predicted_signal",
+                "actual_return",
+                "predicted_return",
+                "realized_pnl",
+                "was_correct",
+                "hit_rate",
+                "cumulative_pnl",
+                "alpha_drift",
+            )
+        )
+        summary = {
+            "count": len(rows),
+            "latest_hit_rate": rows[-1]["hit_rate"] if rows else 0.0,
+            "latest_cumulative_pnl": rows[-1]["cumulative_pnl"] if rows else 0.0,
+            "latest_alpha_drift": rows[-1]["alpha_drift"] if rows else 0.0,
+        }
+        return Response({"summary": summary, "items": rows})
+
+
 class HealthCheckView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        from django.db import connections
         from django.core.cache import cache
+
         checks = {}
         try:
             connections["default"].cursor().execute("SELECT 1")
             checks["postgres"] = "ok"
-        except Exception as e:
-            checks["postgres"] = str(e)
+        except Exception as exc:
+            checks["postgres"] = str(exc)
         try:
-            cache.set("hc", "1", 5); checks["redis"] = "ok"
-        except Exception as e:
-            checks["redis"] = str(e)
-        code = 200 if all(v=="ok" for v in checks.values()) else 503
-        return Response({"status":"ok" if code==200 else "degraded","checks":checks}, status=code)
+            cache.set("hc", "1", 5)
+            checks["redis"] = "ok"
+        except Exception as exc:
+            checks["redis"] = str(exc)
+        code = 200 if all(value == "ok" for value in checks.values()) else 503
+        return Response({"status": "ok" if code == 200 else "degraded", "checks": checks}, status=code)

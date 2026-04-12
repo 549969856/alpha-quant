@@ -1,39 +1,82 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useParams, Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
+import toast from "react-hot-toast";
 import { api } from "../api/client";
 import FeatureSelector from "../components/forms/FeatureSelector";
-import toast from "react-hot-toast";
-import { Check } from "lucide-react";
+import ModelHparamsForm, { getDefaultHparams, normalizeHparams } from "../components/forms/ModelHparamsForm";
+import ActionModal from "../components/ui/ActionModal";
 
-const STEPS = ["基本設定", "特徵選擇", "模型架構", "啟動訓練"];
+const CREATE_STEPS = ["基本設定", "特徵與參數", "確認送出"];
+const MIN_TRAIN_PERCENT = 10;
+
+const cardStyle = {
+  background: "#131929",
+  border: "1px solid rgba(255,255,255,0.07)",
+  borderRadius: 16,
+  padding: 24,
+};
+
+function yesterday() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function clampSplit(value, fallback = 0) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(next)));
+}
+
+function rebalanceSplit(current, key, value) {
+  const maxEditable = 100 - MIN_TRAIN_PERCENT;
+  const next = {
+    val: clampSplit(current.val, 15),
+    test: clampSplit(current.test, 15),
+  };
+
+  next[key] = clampSplit(value, next[key]);
+  if (next.val + next.test > maxEditable) {
+    const otherKey = key === "val" ? "test" : "val";
+    next[otherKey] = Math.max(0, maxEditable - next[key]);
+  }
+
+  const train = Math.max(MIN_TRAIN_PERCENT, 100 - next.val - next.test);
+  const overflow = next.val + next.test + train - 100;
+  if (overflow > 0) {
+    const targetKey = key === "val" ? "test" : "val";
+    next[targetKey] = Math.max(0, next[targetKey] - overflow);
+  }
+
+  return {
+    train: Math.max(MIN_TRAIN_PERCENT, 100 - next.val - next.test),
+    val: next.val,
+    test: next.test,
+  };
+}
 
 function StepBar({ step }) {
   return (
-    <div style={{display:"flex",alignItems:"center",gap:0,marginBottom:32}}>
-      {STEPS.map((label, i) => {
-        const done = step > i;
-        const active = step === i;
+    <div style={{ display: "flex", gap: 10, marginBottom: 22, flexWrap: "wrap" }}>
+      {CREATE_STEPS.map((label, index) => {
+        const active = index === step;
+        const done = index < step;
         return (
-          <div key={i} style={{display:"flex",alignItems:"center",flex:i<STEPS.length-1?"1":"none"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-              <div style={{
-                width:28,height:28,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",
-                fontSize:12,fontWeight:700,transition:"all 0.2s",
-                background:done?"#6366f1":active?"rgba(99,102,241,0.2)":"rgba(255,255,255,0.05)",
-                border:active?"2px solid #6366f1":"2px solid transparent",
-                color:done?"#fff":active?"#a5b4fc":"#475569",
-              }}>
-                {done ? <Check size={12} strokeWidth={3} /> : i + 1}
-              </div>
-              <span style={{fontSize:12,fontWeight:active?600:400,color:active?"#e2e8f0":done?"#6366f1":"#475569",whiteSpace:"nowrap"}}>
-                {label}
-              </span>
-            </div>
-            {i < STEPS.length - 1 && (
-              <div style={{flex:1,height:1,margin:"0 12px",background:step>i?"#6366f1":"rgba(255,255,255,0.06)"}} />
-            )}
+          <div
+            key={label}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 999,
+              border: `1px solid ${active ? "rgba(96,165,250,0.4)" : "rgba(255,255,255,0.06)"}`,
+              background: done ? "rgba(52,211,153,0.12)" : active ? "rgba(96,165,250,0.12)" : "rgba(255,255,255,0.02)",
+              color: done ? "#6ee7b7" : active ? "#93c5fd" : "#94a3b8",
+              fontSize: 12,
+              fontWeight: 700,
+            }}
+          >
+            {index + 1}. {label}
           </div>
         );
       })}
@@ -41,365 +84,580 @@ function StepBar({ step }) {
   );
 }
 
-function Field({ label, children }) {
+function ActionRow({ onBack, onNext, nextLabel, pending }) {
   return (
-    <div>
-      <label style={{display:"block",fontSize:11,fontWeight:600,color:"#475569",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:6}}>
-        {label}
-      </label>
-      {children}
+    <div style={{ display: "flex", gap: 12, marginTop: 22 }}>
+      <button
+        type="button"
+        onClick={onBack}
+        disabled={!onBack}
+        style={{
+          flex: 1,
+          padding: "12px 14px",
+          borderRadius: 10,
+          border: "1px solid rgba(255,255,255,0.08)",
+          background: "rgba(255,255,255,0.03)",
+          color: "#cbd5e1",
+          cursor: onBack ? "pointer" : "not-allowed",
+          opacity: onBack ? 1 : 0.45,
+        }}
+      >
+        回上一步
+      </button>
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={pending}
+        style={{
+          flex: 1,
+          padding: "12px 14px",
+          borderRadius: 10,
+          border: "none",
+          background: "linear-gradient(135deg,#2563eb,#1d4ed8)",
+          color: "#fff",
+          cursor: "pointer",
+          fontWeight: 700,
+        }}
+      >
+        {pending ? "處理中..." : nextLabel}
+      </button>
     </div>
   );
 }
 
-const cardStyle = {background:"#131929",border:"1px solid rgba(255,255,255,0.07)",borderRadius:14,padding:28};
-const primaryBtn = {width:"100%",padding:"12px 0",borderRadius:9,fontSize:14,fontWeight:600,color:"#fff",border:"none",cursor:"pointer",background:"linear-gradient(135deg,#6366f1,#8b5cf6)"};
+function SplitEditor({ splitConfig, setSplitConfig }) {
+  const onChange = (key, value) => {
+    setSplitConfig(current => rebalanceSplit(current, key, value));
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12, alignItems: "center" }}>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>Validation</label>
+          <input
+            type="range"
+            min="0"
+            max={100 - MIN_TRAIN_PERCENT}
+            value={splitConfig.val}
+            onChange={e => onChange("val", e.target.value)}
+            style={{ width: "100%" }}
+          />
+        </div>
+        <input
+          className="input-dark"
+          type="number"
+          min="0"
+          max={100 - MIN_TRAIN_PERCENT}
+          value={splitConfig.val}
+          onChange={e => onChange("val", e.target.value)}
+        />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12, alignItems: "center" }}>
+        <div>
+          <label style={{ display: "block", fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>Test</label>
+          <input
+            type="range"
+            min="0"
+            max={100 - MIN_TRAIN_PERCENT}
+            value={splitConfig.test}
+            onChange={e => onChange("test", e.target.value)}
+            style={{ width: "100%" }}
+          />
+        </div>
+        <input
+          className="input-dark"
+          type="number"
+          min="0"
+          max={100 - MIN_TRAIN_PERCENT}
+          value={splitConfig.test}
+          onChange={e => onChange("test", e.target.value)}
+        />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
+        <div style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(52,211,153,0.12)", border: "1px solid rgba(52,211,153,0.22)" }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6 }}>Train</div>
+          <div style={{ color: "#6ee7b7", fontSize: 18, fontWeight: 800 }}>{splitConfig.train}%</div>
+          <div style={{ fontSize: 11, color: "#cbd5e1", marginTop: 4 }}>自動計算</div>
+        </div>
+        <div style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,0.03)" }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6 }}>Val</div>
+          <div style={{ color: "#f8fafc", fontSize: 18, fontWeight: 800 }}>{splitConfig.val}%</div>
+        </div>
+        <div style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,0.03)" }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6 }}>Test</div>
+          <div style={{ color: "#f8fafc", fontSize: 18, fontWeight: 800 }}>{splitConfig.test}%</div>
+        </div>
+      </div>
+      <p style={{ fontSize: 12, color: "#94a3b8" }}>
+        系統會自動維持 `Train = 100 - Val - Test`，並保留至少 {MIN_TRAIN_PERCENT}% 給 Train。
+      </p>
+    </div>
+  );
+}
+
+function ModelPicker({ models, selectedArchId, onSelect }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 10, marginBottom: 18 }}>
+      {models.map(model => {
+        const selected = selectedArchId === model.id;
+        return (
+          <button
+            key={model.id}
+            type="button"
+            onClick={() => onSelect(model.id)}
+            style={{
+              textAlign: "left",
+              borderRadius: 12,
+              padding: 14,
+              border: `1px solid ${selected ? "rgba(96,165,250,0.45)" : "rgba(255,255,255,0.06)"}`,
+              background: selected ? "rgba(59,130,246,0.12)" : "rgba(255,255,255,0.02)",
+              color: "#f8fafc",
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{model.display_name}</div>
+            <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.5 }}>{model.description}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function ExperimentPage() {
   const navigate = useNavigate();
   const { id: experimentId } = useParams();
   const isEditMode = Boolean(experimentId);
-  const qc = useQueryClient();
+  const queryClient = useQueryClient();
 
   const [step, setStep] = useState(0);
   const [features, setFeatures] = useState([]);
-  const [selectedArch, setArch] = useState(null);
+  const [selectedArchId, setSelectedArchId] = useState("");
+  const [selectedArch, setSelectedArch] = useState("");
   const [hparams, setHparams] = useState({});
-  const [expId, setExpId] = useState(experimentId ?? null);
+  const [splitConfig, setSplitConfig] = useState({ train: 70, val: 15, test: 15 });
+  const [expId, setExpId] = useState(experimentId || null);
+  const [modalState, setModalState] = useState({ type: null, values: null });
 
-  const { register, handleSubmit, watch, reset } = useForm({
-    defaultValues:{
-      ticker:"2603.TW",
-      benchmark:"0050.TW",
-      date_start:"2020-01-01",
-      date_end:"2026-03-27",
-      name:"",
-      description:"",
-      transaction_cost:0.002,
+  const form = useForm({
+    defaultValues: {
+      name: "",
+      description: "",
+      ticker: "2603.TW",
+      benchmark: "0050.TW",
+      date_start: "2020-01-01",
+      date_end: yesterday(),
+      random_seed: 42,
     },
   });
 
+  const { register, handleSubmit, watch, reset, clearErrors } = form;
+
   const { data: models = [] } = useQuery({
-    queryKey:["models"],
-    queryFn:() => api.get("/models/").then(r => r.data),
-    enabled:!isEditMode,
+    queryKey: ["models"],
+    queryFn: () => api.get("/models/").then(r => r.data),
   });
 
-  const { data: experiment, isLoading: isExperimentLoading } = useQuery({
-    queryKey:["experiment", experimentId],
-    queryFn:() => api.get(`/experiments/${experimentId}/`).then(r => r.data),
-    enabled:isEditMode,
+  const { data: experiment, isLoading: loadingExperiment } = useQuery({
+    queryKey: ["experiment", experimentId],
+    queryFn: () => api.get(`/experiments/${experimentId}/`).then(r => r.data),
+    enabled: isEditMode,
   });
+
+  const latestRun = experiment?.runs?.[0] || null;
+  const modelLookup = useMemo(() => {
+    const map = new Map();
+    models.forEach(model => {
+      map.set(model.id, model);
+      map.set(model.arch, model);
+    });
+    return map;
+  }, [models]);
 
   useEffect(() => {
     if (!experiment) return;
     reset({
-      name:experiment.name ?? "",
-      description:experiment.description ?? "",
-      ticker:experiment.ticker ?? "2603.TW",
-      benchmark:experiment.benchmark ?? "0050.TW",
-      date_start:experiment.date_start ?? "2020-01-01",
-      date_end:experiment.date_end ?? "2026-03-27",
-      transaction_cost:0.002,
+      name: experiment.name || "",
+      description: experiment.description || "",
+      ticker: experiment.ticker || "2603.TW",
+      benchmark: experiment.benchmark || "0050.TW",
+      date_start: experiment.date_start || "2020-01-01",
+      date_end: experiment.date_end || yesterday(),
+      random_seed: experiment.random_seed ?? 42,
     });
-    setFeatures(experiment.feature_ids ?? []);
+    setFeatures(experiment.feature_ids || []);
+    setSplitConfig(experiment.split_config || { train: 70, val: 15, test: 15 });
     setExpId(experiment.id);
+    if (experiment.runs?.length) {
+      const run = experiment.runs[0];
+      setSelectedArchId(run.model_arch_id || "");
+      setHparams(run.hparams || {});
+    }
   }, [experiment, reset]);
 
+  useEffect(() => {
+    const model = modelLookup.get(selectedArchId);
+    setSelectedArch(model?.arch || "");
+  }, [modelLookup, selectedArchId]);
+
   const createExp = useMutation({
-    mutationFn:body => api.post("/experiments/", body),
-    onSuccess:d => {
-      setExpId(d.data.id);
-      qc.invalidateQueries({ queryKey:["experiments"] });
-      setStep(1);
+    mutationFn: body => api.post("/experiments/", body),
+    onSuccess: res => {
+      setExpId(res.data.id);
+      queryClient.invalidateQueries({ queryKey: ["experiments"] });
     },
-    onError:() => toast.error("建立失敗"),
+    onError: () => toast.error("建立實驗失敗"),
   });
 
   const updateExp = useMutation({
-    mutationFn:({ id, body }) => api.patch(`/experiments/${id}/`, body),
-    onSuccess:() => {
-      qc.invalidateQueries({ queryKey:["experiments"] });
-      qc.invalidateQueries({ queryKey:["experiment", experimentId] });
-      toast.success("實驗已更新");
-      navigate("/");
+    mutationFn: ({ id, body }) => api.patch(`/experiments/${id}/`, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["experiments"] });
+      queryClient.invalidateQueries({ queryKey: ["experiment", experimentId] });
     },
-    onError:() => toast.error("更新失敗"),
+    onError: () => toast.error("儲存實驗失敗"),
   });
 
   const launchTrain = useMutation({
-    mutationFn:({ id, body }) => api.post(`/experiments/${id}/train/`, body),
-    onSuccess:d => {
-      toast.success("訓練已啟動");
-      navigate(`/run/${d.data.run_id}/status`);
+    mutationFn: ({ id, body }) => api.post(`/experiments/${id}/train/`, body),
+    onSuccess: res => {
+      toast.success("研究任務已送出");
+      navigate(`/run/${res.data.run_id}/status`);
     },
-    onError:() => toast.error("啟動失敗"),
+    onError: () => toast.error("啟動訓練失敗"),
   });
 
-  const onStep0 = handleSubmit(data => createExp.mutate({ ...data, feature_ids:[] }));
-  const onStep1 = async () => {
-    if (features.length < 2) {
-      toast.error("請至少選擇 2 個特徵");
-      return;
-    }
-    try {
-      await api.patch(`/experiments/${expId}/`, { feature_ids:features });
-      setStep(2);
-    } catch {
-      toast.error("特徵儲存失敗");
-    }
-  };
-  const onStep2 = () => {
-    if (!selectedArch) {
-      toast.error("請選擇模型");
-      return;
-    }
-    const a = models.find(m => m.id === selectedArch);
-    const tx = Number(watch("transaction_cost"));
-    setHparams({ ...(a?.default_hparams ?? {}), transaction_cost:Number.isFinite(tx) ? tx : 0.002 });
-    setStep(3);
-  };
-  const onLaunch = () => launchTrain.mutate({ id:expId, body:{ model_arch_id:selectedArch, hparams } });
+  const retrainMutation = useMutation({
+    mutationFn: ({ id, body }) => api.post(`/experiments/${id}/retrain/`, body),
+    onSuccess: res => {
+      queryClient.invalidateQueries({ queryKey: ["experiments"] });
+      queryClient.invalidateQueries({ queryKey: ["experiment", experimentId] });
+      toast.success(res.data.action === "forked" ? "已建立分支並啟動訓練" : "已重新訓練");
+      if (res.data.action === "forked") {
+        navigate(`/experiment/${res.data.experiment_id}`);
+        return;
+      }
+      navigate(`/run/${res.data.run_id}/status`);
+    },
+    onError: err => {
+      toast.error(err?.response?.data?.error || "重新訓練失敗");
+    },
+  });
 
-  const onSaveEdit = handleSubmit(data => {
-    if (features.length < 2) {
-      toast.error("請至少選擇 2 個特徵");
+  const persistExperiment = async values => {
+    const payload = {
+      ...values,
+      random_seed: Number(values.random_seed || 42),
+      split_config: splitConfig,
+      feature_ids: features,
+    };
+    if (!expId) {
+      const res = await createExp.mutateAsync(payload);
+      return res?.data?.id;
+    }
+    await updateExp.mutateAsync({ id: expId, body: payload });
+    return expId;
+  };
+
+  const selectModel = archId => {
+    const defaults = getDefaultHparams(models, archId);
+    setSelectedArchId(archId);
+    setHparams(defaults);
+    clearErrors();
+  };
+
+  const handleBack = nextStep => {
+    clearErrors();
+    setStep(nextStep);
+  };
+
+  const nextBasic = handleSubmit(async values => {
+    if (!selectedArchId) {
+      toast.error("請先選擇模型架構");
       return;
     }
-    updateExp.mutate({
-      id:experimentId,
-      body:{
-        name:data.name,
-        description:data.description,
-        ticker:data.ticker,
-        benchmark:data.benchmark,
-        date_start:data.date_start,
-        date_end:data.date_end,
-        feature_ids:features,
+    const id = await persistExperiment(values);
+    if (id) {
+      setExpId(id);
+      setStep(1);
+    }
+  });
+
+  const nextParams = async () => {
+    if (features.length < 2) {
+      toast.error("至少要選 2 個特徵");
+      return;
+    }
+    if (!selectedArchId) {
+      toast.error("請先選擇模型架構");
+      return;
+    }
+    const values = watch();
+    await persistExperiment(values);
+    clearErrors();
+    setStep(2);
+  };
+
+  const submitAll = async () => {
+    const normalized = normalizeHparams(hparams);
+    if (!selectedArchId) {
+      toast.error("請先選擇模型架構");
+      return;
+    }
+    launchTrain.mutate({
+      id: expId,
+      body: {
+        model_arch_id: selectedArchId,
+        hparams: normalized,
       },
+    });
+  };
+
+  const buildRetrainPayload = values => ({
+    name: values.name,
+    description: values.description,
+    ticker: values.ticker,
+    benchmark: values.benchmark,
+    date_start: values.date_start,
+    date_end: values.date_end,
+    random_seed: Number(values.random_seed || 42),
+    split_config: splitConfig,
+    feature_ids: features,
+    model_arch_id: selectedArchId || latestRun?.model_arch_id,
+    hparams: normalizeHparams(hparams),
+  });
+
+  const closeModal = () => setModalState({ type: null, values: null });
+
+  const handleRetrain = handleSubmit(async values => {
+    const payload = buildRetrainPayload(values);
+    if (!payload.model_arch_id) {
+      toast.error("沒有可用的模型架構，請先選擇模型");
+      return;
+    }
+
+    if (experiment?.status === "done") {
+      setModalState({
+        type: "fork",
+        values: {
+          payload,
+          defaultForkName: `${values.name} Fork`,
+        },
+      });
+      return;
+    }
+
+    setModalState({
+      type: "retrain",
+      values: { payload },
     });
   });
 
-  const latestRun = experiment?.runs?.[0];
-
-  if (isEditMode && isExperimentLoading) {
-    return (
-      <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:300}}>
-        <div style={{width:36,height:36,borderRadius:"50%",border:"3px solid rgba(99,102,241,0.2)",borderTop:"3px solid #6366f1",animation:"spin 0.8s linear infinite"}} />
-      </div>
-    );
+  if (isEditMode && loadingExperiment) {
+    return <div style={{ color: "#94a3b8" }}>讀取實驗中...</div>;
   }
 
-  if (isEditMode) {
-    return (
-      <div style={{maxWidth:860}}>
-        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:28,gap:16}}>
-          <div>
-            <h1 style={{fontSize:22,fontWeight:800,color:"#f1f5f9",letterSpacing:"-0.02em"}}>🛠 編輯實驗</h1>
-            <p style={{fontSize:13,color:"#475569",marginTop:4}}>調整實驗設定、特徵組合與歷史紀錄檢視</p>
-          </div>
-          <Link to="/" style={{padding:"10px 14px",borderRadius:9,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)",color:"#cbd5e1",textDecoration:"none",fontSize:13}}>
-            返回儀表板
-          </Link>
-        </div>
-
-        <div style={{...cardStyle, marginBottom:16}}>
-          <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:20}}>📌 基本設定</p>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-            <Field label="實驗名稱">
-              <input {...register("name", { required:true })} className="input-dark" />
-            </Field>
-            <Field label="描述">
-              <input {...register("description")} className="input-dark" />
-            </Field>
-            <Field label="股票代碼">
-              <input {...register("ticker", { required:true })} className="input-dark" />
-            </Field>
-            <Field label="基準指數">
-              <input {...register("benchmark", { required:true })} className="input-dark" />
-            </Field>
-            <Field label="開始日期">
-              <input type="date" {...register("date_start", { required:true })} className="input-dark" />
-            </Field>
-            <Field label="結束日期">
-              <input type="date" {...register("date_end", { required:true })} className="input-dark" />
-            </Field>
-          </div>
-        </div>
-
-        <div style={{...cardStyle, marginBottom:16}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-            <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em"}}>🧩 特徵選擇</p>
-            <span style={{fontSize:12,color:features.length>=2?"#34d399":"#f59e0b",fontWeight:500}}>
-              已選 {features.length} 個{features.length<2?" (至少2個)":""}
-            </span>
-          </div>
-          <FeatureSelector value={features} onChange={setFeatures} />
-        </div>
-
-        <div style={{...cardStyle, marginBottom:16}}>
-          <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:16}}>📚 歷史執行紀錄</p>
-          {!experiment?.runs?.length ? (
-            <p style={{fontSize:13,color:"#64748b"}}>目前還沒有執行紀錄。</p>
-          ) : (
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {experiment.runs.map(run => (
-                <div key={run.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,padding:"12px 14px",borderRadius:10,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)"}}>
-                  <div>
-                    <p style={{fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{run.model_name || "未命名模型"}</p>
-                    <p style={{fontSize:11,color:"#64748b",marginTop:4}}>Run {run.id.slice(0, 8).toUpperCase()} · {run.status}</p>
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    {run.status === "done" && (
-                      <>
-                        <Link to={`/run/${run.id}/backtest`} style={{padding:"6px 10px",borderRadius:7,fontSize:12,textDecoration:"none",background:"rgba(96,165,250,0.1)",color:"#93c5fd",border:"1px solid rgba(96,165,250,0.2)"}}>
-                          回測
-                        </Link>
-                        <Link to={`/run/${run.id}/prediction`} style={{padding:"6px 10px",borderRadius:7,fontSize:12,textDecoration:"none",background:"rgba(139,92,246,0.1)",color:"#c4b5fd",border:"1px solid rgba(139,92,246,0.2)"}}>
-                          預測
-                        </Link>
-                      </>
-                    )}
-                    {run.status === "training" && (
-                      <Link to={`/run/${run.id}/status`} style={{padding:"6px 10px",borderRadius:7,fontSize:12,textDecoration:"none",background:"rgba(245,158,11,0.1)",color:"#fbbf24",border:"1px solid rgba(245,158,11,0.2)"}}>
-                        訓練中
-                      </Link>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div style={{display:"flex",gap:12}}>
-          <button onClick={onSaveEdit} disabled={updateExp.isPending} style={{...primaryBtn, flex:1}}>
-            {updateExp.isPending ? "儲存中…" : "儲存修改"}
-          </button>
-          {latestRun?.status === "done" && (
-            <Link to={`/run/${latestRun.id}/backtest`} style={{flex:1,textAlign:"center",padding:"12px 0",borderRadius:9,textDecoration:"none",background:"rgba(99,102,241,0.12)",border:"1px solid rgba(99,102,241,0.2)",color:"#a5b4fc",fontWeight:600}}>
-              查看最新回測
-            </Link>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  const summaryRows = [
-    ["股票", watch("ticker")],
-    ["基準", watch("benchmark")],
-    ["期間", `${watch("date_start")} → ${watch("date_end")}`],
-    ["手續費率", Number(watch("transaction_cost") || 0).toFixed(4)],
-    ["特徵數", `${features.length} 個特徵`],
-    ["模型", models.find(m => m.id === selectedArch)?.display_name],
+  const summary = [
+    ["名稱", watch("name") || "-"],
+    ["股票", watch("ticker") || "-"],
+    ["基準", watch("benchmark") || "-"],
+    ["日期區間", `${watch("date_start")} -> ${watch("date_end")}`],
+    ["Random Seed", String(watch("random_seed"))],
+    ["資料切分", `Train ${splitConfig.train}% / Val ${splitConfig.val}% / Test ${splitConfig.test}%`],
+    ["特徵數", String(features.length)],
+    ["模型", modelLookup.get(selectedArchId)?.display_name || latestRun?.model_name || "-"],
   ];
 
   return (
-    <div style={{maxWidth:780}}>
-      <div style={{marginBottom:28}}>
-        <h1 style={{fontSize:22,fontWeight:800,color:"#f1f5f9",letterSpacing:"-0.02em"}}>🧪 新建實驗</h1>
-        <p style={{fontSize:13,color:"#475569",marginTop:4}}>四步驟完成模型訓練與策略回測</p>
+    <div style={{ maxWidth: 920 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h1 style={{ fontSize: 26, color: "#f8fafc", marginBottom: 6 }}>
+            {isEditMode ? "編輯研究實驗" : "建立新研究實驗"}
+          </h1>
+          <p style={{ color: "#94a3b8", fontSize: 14 }}>
+            研究回測與實戰部署已分流。這裡只處理研究設定、回測，以及重新訓練或建立分支。
+          </p>
+        </div>
+        <Link to="/" style={{ color: "#93c5fd", textDecoration: "none" }}>回 Dashboard</Link>
       </div>
 
-      <StepBar step={step} />
+      {!isEditMode && <StepBar step={step} />}
 
-      {step === 0 && (
+      {(isEditMode || step === 0) && (
         <div style={cardStyle}>
-          <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:20}}>📌 基本設定</p>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-            <Field label="實驗名稱">
-              <input {...register("name", { required:true })} placeholder="e.g. 長榮裸K測試" className="input-dark" />
-            </Field>
-            <Field label="描述（選填）">
-              <input {...register("description")} placeholder="簡短說明" className="input-dark" />
-            </Field>
-            <Field label="股票代碼">
-              <input {...register("ticker")} className="input-dark" />
-            </Field>
-            <Field label="基準指數">
-              <input {...register("benchmark")} className="input-dark" />
-            </Field>
-            <Field label="開始日期">
-              <input type="date" {...register("date_start")} className="input-dark" />
-            </Field>
-            <Field label="結束日期">
-              <input type="date" {...register("date_end")} className="input-dark" />
-            </Field>
-            <Field label="交易手續費率">
-              <input type="number" step="0.0001" min="0" {...register("transaction_cost")} className="input-dark" />
-            </Field>
+          <h2 style={{ color: "#f8fafc", marginBottom: 18 }}>基本設定與模型</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 14 }}>
+            <input className="input-dark" placeholder="實驗名稱" {...register("name", { required: true })} />
+            <input className="input-dark" placeholder="描述" {...register("description")} />
+            <input className="input-dark" placeholder="Ticker" {...register("ticker", { required: true })} />
+            <input className="input-dark" placeholder="Benchmark" {...register("benchmark", { required: true })} />
+            <input className="input-dark" type="date" {...register("date_start", { required: true })} />
+            <input className="input-dark" type="date" {...register("date_end", { required: true })} />
+            <input className="input-dark" type="number" {...register("random_seed", { required: true })} />
           </div>
-          <div style={{marginTop:24}}>
-            <button onClick={onStep0} disabled={createExp.isPending} style={primaryBtn}>
-              {createExp.isPending ? "建立中…" : "下一步 →"}
+
+          <div style={{ marginTop: 22 }}>
+            <h3 style={{ color: "#e2e8f0", marginBottom: 12, fontSize: 14 }}>資料切分</h3>
+            <SplitEditor splitConfig={splitConfig} setSplitConfig={setSplitConfig} />
+          </div>
+
+          <div style={{ marginTop: 22 }}>
+            <h3 style={{ color: "#e2e8f0", marginBottom: 12, fontSize: 14 }}>模型架構</h3>
+            <ModelPicker models={models} selectedArchId={selectedArchId} onSelect={selectModel} />
+          </div>
+
+          {!isEditMode && (
+            <ActionRow
+              onBack={null}
+              onNext={nextBasic}
+              nextLabel="前往特徵與參數"
+              pending={createExp.isPending || updateExp.isPending}
+            />
+          )}
+        </div>
+      )}
+
+      {(isEditMode || step === 1) && (
+        <div style={{ ...cardStyle, marginTop: isEditMode ? 16 : 0 }}>
+          <h2 style={{ color: "#f8fafc", marginBottom: 18 }}>特徵與超參數</h2>
+          <FeatureSelector value={features} onChange={setFeatures} />
+          <div style={{ marginTop: 20 }}>
+            <ModelHparamsForm
+              key={selectedArchId || "no-model"}
+              arch={selectedArch}
+              hparams={hparams}
+              onChange={setHparams}
+            />
+          </div>
+          {!isEditMode && (
+            <ActionRow
+              onBack={() => handleBack(0)}
+              onNext={nextParams}
+              nextLabel="前往確認"
+              pending={updateExp.isPending}
+            />
+          )}
+        </div>
+      )}
+
+      {!isEditMode && step === 2 && (
+        <div style={cardStyle}>
+          <h2 style={{ color: "#f8fafc", marginBottom: 18 }}>確認送出</h2>
+          <div style={{ display: "grid", gap: 10 }}>
+            {summary.map(([label, value]) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                <span style={{ color: "#94a3b8" }}>{label}</span>
+                <span style={{ color: "#f8fafc", fontFamily: "'JetBrains Mono',monospace" }}>{value}</span>
+              </div>
+            ))}
+          </div>
+          <ActionRow
+            onBack={() => handleBack(1)}
+            onNext={submitAll}
+            nextLabel="啟動研究回測"
+            pending={launchTrain.isPending}
+          />
+        </div>
+      )}
+
+      {isEditMode && (
+        <div style={{ ...cardStyle, marginTop: 16 }}>
+          <h2 style={{ color: "#f8fafc", marginBottom: 18 }}>編輯動作</h2>
+          <div style={{ display: "grid", gap: 10, marginBottom: 18 }}>
+            {summary.map(([label, value]) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                <span style={{ color: "#94a3b8" }}>{label}</span>
+                <span style={{ color: "#f8fafc", fontFamily: "'JetBrains Mono',monospace" }}>{value}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button
+              type="button"
+              onClick={handleSubmit(async values => {
+                await persistExperiment(values);
+                toast.success("實驗已儲存");
+              })}
+              style={{
+                flex: 1,
+                padding: "12px 14px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.08)",
+                background: "rgba(255,255,255,0.03)",
+                color: "#e2e8f0",
+                cursor: "pointer",
+                fontWeight: 700,
+              }}
+            >
+              儲存變更
+            </button>
+            <button
+              type="button"
+              onClick={handleRetrain}
+              disabled={retrainMutation.isPending}
+              style={{
+                flex: 1,
+                padding: "12px 14px",
+                borderRadius: 10,
+                border: "none",
+                background: "linear-gradient(135deg,#2563eb,#1d4ed8)",
+                color: "#fff",
+                cursor: "pointer",
+                fontWeight: 700,
+              }}
+            >
+              {retrainMutation.isPending ? "處理中..." : "重新訓練"}
             </button>
           </div>
         </div>
       )}
 
-      {step === 1 && (
-        <div style={cardStyle}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-            <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em"}}>🧩 特徵選擇</p>
-            <span style={{fontSize:12,color:features.length>=2?"#34d399":"#f59e0b",fontWeight:500}}>
-              已選 {features.length} 個{features.length<2?" (至少2個)":""}
-            </span>
-          </div>
-          <FeatureSelector value={features} onChange={setFeatures} />
-          <div style={{marginTop:20}}>
-            <button onClick={onStep1} style={primaryBtn}>下一步 →</button>
-          </div>
-        </div>
-      )}
+      <ActionModal
+        open={modalState.type === "retrain"}
+        title="重新訓練實驗"
+        message="確定要使用目前畫面上的參數直接覆蓋原實驗，並重新啟動訓練嗎？"
+        confirmLabel="確認重訓"
+        cancelLabel="先不要"
+        loading={retrainMutation.isPending}
+        onCancel={closeModal}
+        onConfirm={() => {
+          retrainMutation.mutate({
+            id: experimentId,
+            body: modalState.values?.payload,
+          }, {
+            onSettled: closeModal,
+          });
+        }}
+      />
 
-      {step === 2 && (
-        <div style={cardStyle}>
-          <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:20}}>🤖 選擇模型架構</p>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:20}}>
-            {models.map(m => {
-              const sel = selectedArch === m.id;
-              return (
-                <button key={m.id} onClick={() => setArch(m.id)} style={{
-                  padding:"14px 12px",borderRadius:10,border:`1px solid ${sel?"rgba(99,102,241,0.5)":"rgba(255,255,255,0.06)"}`,
-                  background:sel?"rgba(99,102,241,0.08)":"rgba(255,255,255,0.02)",
-                  cursor:"pointer",textAlign:"left",transition:"all 0.15s",
-                }}>
-                  <p style={{fontSize:13,fontWeight:600,color:sel?"#a5b4fc":"#cbd5e1",marginBottom:4}}>{m.display_name}</p>
-                  <p style={{fontSize:11,color:"#475569",lineHeight:1.5}} className="line-clamp-2">{m.description}</p>
-                </button>
-              );
-            })}
-          </div>
-          <div style={{marginTop:20}}>
-            <button onClick={onStep2} style={primaryBtn}>下一步 →</button>
-          </div>
-        </div>
-      )}
-
-      {step === 3 && (
-        <div style={cardStyle}>
-          <p style={{fontSize:13,fontWeight:600,color:"#94a3b8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:20}}>🚀 確認啟動</p>
-          <div style={{background:"rgba(255,255,255,0.02)",borderRadius:10,padding:"8px 16px",marginBottom:24}}>
-            {summaryRows.map(([l, v]) => (
-              <div key={l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid rgba(255,255,255,0.05)"}}>
-                <span style={{fontSize:12,color:"#475569"}}>{l}</span>
-                <span style={{fontSize:12,fontWeight:500,color:"#e2e8f0",fontFamily:"'JetBrains Mono',monospace"}}>{v}</span>
-              </div>
-            ))}
-          </div>
-          <button onClick={onLaunch} disabled={launchTrain.isPending} style={{
-            ...primaryBtn,
-            padding:"14px 0",
-            fontSize:15,
-            letterSpacing:"-0.01em",
-            background:launchTrain.isPending?"#3730a3":"linear-gradient(135deg,#6366f1,#8b5cf6)",
-            boxShadow:"0 4px 24px rgba(99,102,241,0.3)",
-          }}>
-            {launchTrain.isPending ? "送出中…" : "開始訓練"}
-          </button>
-        </div>
-      )}
+      <ActionModal
+        open={modalState.type === "fork"}
+        title="建立分支後重新訓練"
+        message="這個實驗已經完成。為了保留既有對帳與回測紀錄，系統會先建立一個新的實驗分支，再用目前參數重新訓練。"
+        inputLabel="新實驗名稱"
+        inputPlaceholder="例如：My Strategy Fork"
+        inputDefaultValue={modalState.values?.defaultForkName || ""}
+        requireInput
+        confirmLabel="建立分支並訓練"
+        cancelLabel="取消"
+        loading={retrainMutation.isPending}
+        onCancel={closeModal}
+        onConfirm={forkName => {
+          retrainMutation.mutate({
+            id: experimentId,
+            body: {
+              ...modalState.values?.payload,
+              fork_name: forkName,
+            },
+          }, {
+            onSettled: closeModal,
+          });
+        }}
+      />
     </div>
   );
 }

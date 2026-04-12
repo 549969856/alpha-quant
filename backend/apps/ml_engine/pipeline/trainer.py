@@ -16,7 +16,7 @@ All models expose the same interface:
 """
 
 from __future__ import annotations
-import math, os, logging
+import math, os, logging, random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,6 +28,14 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 
 log = logging.getLogger(__name__)
+
+
+def set_global_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # ─────────────────────────────────────────────
@@ -345,6 +353,7 @@ class LightGBMTrainer(BaseTrainer):
 
     def save(self, path: str):
         import joblib
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump(self.model, path)
 
     def load(self, path: str):

@@ -2,9 +2,25 @@
 import axios from "axios";
 import { useAuthStore } from "../store/authStore";
 
+function normalizeBaseUrl(raw) {
+  if (!raw) return null;
+  const trimmed = String(raw).trim().replace(/\/+$/, "");
+  if (!trimmed) return null;
+  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+}
+
+function resolveBaseUrl() {
+  const envUrl =
+    normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL) ||
+    normalizeBaseUrl(import.meta.env.VITE_API_URL);
+
+  if (envUrl) return envUrl;
+  if (import.meta.env.DEV) return "http://localhost:8000/api";
+  return "/api";
+}
+
 export const api = axios.create({
-  // In containerized deployments, prefer the frontend nginx reverse proxy.
-  baseURL: import.meta.env.VITE_API_URL ?? "/api",
+  baseURL: resolveBaseUrl(),
   timeout: 30_000,
 });
 
