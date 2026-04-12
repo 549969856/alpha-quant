@@ -61,7 +61,7 @@ services:
       TIMESCALE_URL: postgres://ts_user:ts_secret@timescale:5432/alphaquant_ts
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: dev-secret-key-change-in-prod
-      DEBUG: "false"
+      DEBUG: "true"
       ALLOWED_HOSTS: "*"
     volumes:
       - ./backend:/app

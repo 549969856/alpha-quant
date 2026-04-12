@@ -401,7 +401,13 @@ class LiveDeploymentListCreateView(APIView):
         from apps.ml_engine.models import Experiment, LiveDeployment
 
         exp = Experiment.objects.get(id=request.data.get("source_experiment_id"), user=request.user)
-        source_run = exp.runs.filter(status="done").select_related("model_arch").order_by("-finished_at", "-created_at").first()
+        source_run = (
+            exp.runs
+            .filter(status="done")
+            .select_related("model_arch")
+            .order_by("-finished_at", "-started_at", "-id")
+            .first()
+        )
         if not source_run:
             return Response({"error": "Experiment has no completed run to deploy."}, status=400)
 
