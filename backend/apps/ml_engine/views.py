@@ -1,6 +1,7 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, time as dt_time
 
 from django.db import connections
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.response import Response
@@ -31,6 +32,70 @@ def _serialize_run_summary(run):
 
 def _yesterday():
     return timezone.localdate() - timedelta(days=1)
+
+
+def _today():
+    return timezone.localdate()
+
+
+def _next_run_at(deployment):
+    if not getattr(deployment, "auto_predict_enabled", False) or not getattr(deployment, "auto_predict_time", None):
+        return None
+
+    tz = timezone.get_current_timezone()
+    now = timezone.localtime()
+    scheduled = timezone.make_aware(
+        datetime.combine(now.date(), deployment.auto_predict_time),
+        tz,
+    )
+    if deployment.last_auto_predicted_for == now.date() or scheduled <= now:
+        scheduled += timedelta(days=1)
+    return scheduled
+
+
+def _find_existing_live_cycle_run(deployment, cycle_date=None):
+    cycle_date = cycle_date or _today()
+    return (
+        deployment.runs.filter(
+            Q(prediction_date=cycle_date) |
+            Q(created_at__date=cycle_date, status__in=["pending", "training", "done"])
+        )
+        .exclude(status="failed")
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
+def _serialize_live_run_brief(run):
+    if not run:
+        return None
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "signal": run.signal,
+        "prediction_date": run.prediction_date,
+        "target_date": run.target_date,
+        "confidence": run.confidence,
+        "prob_long": run.prob_long,
+        "prob_short": run.prob_short,
+        "prob_neutral": run.prob_neutral,
+        "training_window_start": run.training_window_start,
+        "training_window_end": run.training_window_end,
+        "created_at": run.created_at,
+    }
+
+
+def _parse_time_string(value):
+    if isinstance(value, dt_time):
+        return value
+    if not value:
+        return dt_time(18, 10)
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(value, fmt).time()
+        except ValueError:
+            continue
+    raise ValueError("Invalid time format. Expected HH:MM or HH:MM:SS")
 
 
 class ModelRegistryView(APIView):
@@ -345,6 +410,7 @@ class PredictionView(APIView):
             "prob_short": pred.prob_short,
             "prob_neutral": pred.prob_neutral,
             "confidence": pred.confidence,
+            "directional_edge": round(float(pred.prob_long - pred.prob_short), 4),
             "rsi_14": pred.rsi_14,
             "vol_ann": pred.vol_ann,
             "excess_ret": 0.0,
@@ -361,10 +427,18 @@ class LiveDeploymentListCreateView(APIView):
     def get(self, request):
         from apps.ml_engine.models import LiveDeployment
 
-        rows = LiveDeployment.objects.filter(user=request.user).select_related("model_arch", "source_experiment").prefetch_related("runs")
+        rows = (
+            LiveDeployment.objects
+            .filter(user=request.user)
+            .select_related("model_arch", "source_experiment")
+            .prefetch_related("runs", "feedback_items")
+        )
         data = []
         for deployment in rows:
             latest_run = deployment.runs.order_by("-created_at").first()
+            feedback_latest = deployment.feedback_items.order_by("-target_date").first()
+            existing_today = _find_existing_live_cycle_run(deployment)
+            next_run_at = _next_run_at(deployment)
             data.append({
                 "id": str(deployment.id),
                 "name": deployment.name,
@@ -382,15 +456,24 @@ class LiveDeploymentListCreateView(APIView):
                 "feature_ids": deployment.feature_ids,
                 "hparams": deployment.hparams,
                 "random_seed": deployment.random_seed,
+                "auto_predict_enabled": deployment.auto_predict_enabled,
+                "auto_predict_time": deployment.auto_predict_time.strftime("%H:%M:%S") if deployment.auto_predict_time else None,
+                "last_auto_predicted_for": deployment.last_auto_predicted_for,
+                "next_run_at": next_run_at,
+                "schedule_status": "enabled" if deployment.auto_predict_enabled else "disabled",
+                "today_prediction_done": bool(existing_today and existing_today.status == "done"),
+                "today_prediction_in_progress": bool(existing_today and existing_today.status in {"pending", "training"}),
+                "today_prediction_run_id": str(existing_today.id) if existing_today else None,
                 "source_experiment_id": str(deployment.source_experiment_id) if deployment.source_experiment_id else None,
-                "latest_run": (
+                "latest_run": _serialize_live_run_brief(latest_run),
+                "latest_feedback": (
                     {
-                        "id": str(latest_run.id),
-                        "status": latest_run.status,
-                        "signal": latest_run.signal,
-                        "prediction_date": latest_run.prediction_date,
-                        "target_date": latest_run.target_date,
-                    } if latest_run else None
+                        "target_date": feedback_latest.target_date,
+                        "hit_rate": feedback_latest.hit_rate,
+                        "cumulative_pnl": feedback_latest.cumulative_pnl,
+                        "alpha_drift": feedback_latest.alpha_drift,
+                        "was_correct": feedback_latest.was_correct,
+                    } if feedback_latest else None
                 ),
                 "created_at": deployment.created_at,
                 "updated_at": deployment.updated_at,
@@ -412,6 +495,7 @@ class LiveDeploymentListCreateView(APIView):
             return Response({"error": "Experiment has no completed run to deploy."}, status=400)
 
         payload = request.data
+        auto_predict_time = _parse_time_string(payload.get("auto_predict_time"))
         deployment = LiveDeployment.objects.create(
             user=request.user,
             source_experiment=exp,
@@ -426,6 +510,8 @@ class LiveDeploymentListCreateView(APIView):
             feature_ids=exp.feature_ids,
             hparams=source_run.hparams,
             random_seed=payload.get("random_seed", exp.random_seed),
+            auto_predict_enabled=bool(payload.get("auto_predict_enabled", False)),
+            auto_predict_time=auto_predict_time,
             status="draft",
         )
         return Response({"id": str(deployment.id), "status": deployment.status}, status=201)
@@ -443,6 +529,8 @@ class LiveDeploymentDetailView(APIView):
         )
         runs = deployment.runs.order_by("-created_at")
         latest_run = runs.first()
+        next_run_at = _next_run_at(deployment)
+        existing_today = _find_existing_live_cycle_run(deployment)
         return Response({
             "id": str(deployment.id),
             "name": deployment.name,
@@ -455,6 +543,14 @@ class LiveDeploymentDetailView(APIView):
             "feature_ids": deployment.feature_ids,
             "hparams": deployment.hparams,
             "random_seed": deployment.random_seed,
+            "auto_predict_enabled": deployment.auto_predict_enabled,
+            "auto_predict_time": deployment.auto_predict_time.strftime("%H:%M:%S") if deployment.auto_predict_time else None,
+            "last_auto_predicted_for": deployment.last_auto_predicted_for,
+            "next_run_at": next_run_at,
+            "schedule_status": "enabled" if deployment.auto_predict_enabled else "disabled",
+            "today_prediction_done": bool(existing_today and existing_today.status == "done"),
+            "today_prediction_in_progress": bool(existing_today and existing_today.status in {"pending", "training"}),
+            "today_prediction_run_id": str(existing_today.id) if existing_today else None,
             "source_experiment_id": str(deployment.source_experiment_id) if deployment.source_experiment_id else None,
             "source_run_id": str(deployment.source_run_id) if deployment.source_run_id else None,
             "model_arch": {
@@ -462,21 +558,7 @@ class LiveDeploymentDetailView(APIView):
                 "display_name": deployment.model_arch.display_name,
                 "arch": deployment.model_arch.arch,
             },
-            "latest_run": (
-                {
-                    "id": str(latest_run.id),
-                    "status": latest_run.status,
-                    "signal": latest_run.signal,
-                    "prediction_date": latest_run.prediction_date,
-                    "target_date": latest_run.target_date,
-                    "confidence": latest_run.confidence,
-                    "prob_long": latest_run.prob_long,
-                    "prob_short": latest_run.prob_short,
-                    "prob_neutral": latest_run.prob_neutral,
-                    "training_window_start": latest_run.training_window_start,
-                    "training_window_end": latest_run.training_window_end,
-                } if latest_run else None
-            ),
+            "latest_run": _serialize_live_run_brief(latest_run),
             "runs": [
                 {
                     "id": str(run.id),
@@ -485,6 +567,14 @@ class LiveDeploymentDetailView(APIView):
                     "target_date": run.target_date,
                     "signal": run.signal,
                     "confidence": run.confidence,
+                    "prob_long": run.prob_long,
+                    "prob_short": run.prob_short,
+                    "prob_neutral": run.prob_neutral,
+                    "training_window_start": run.training_window_start,
+                    "training_window_end": run.training_window_end,
+                    "created_at": run.created_at,
+                    "started_at": run.started_at,
+                    "finished_at": run.finished_at,
                 } for run in runs
             ],
             "created_at": deployment.created_at,
@@ -495,9 +585,15 @@ class LiveDeploymentDetailView(APIView):
         from apps.ml_engine.models import LiveDeployment
 
         deployment = LiveDeployment.objects.get(id=deployment_id, user=request.user)
-        for field in ("name", "description", "ticker", "benchmark", "date_start", "date_end", "random_seed", "status"):
+        for field in (
+            "name", "description", "ticker", "benchmark",
+            "date_start", "date_end", "random_seed", "status",
+            "auto_predict_enabled",
+        ):
             if field in request.data:
                 setattr(deployment, field, request.data[field])
+        if "auto_predict_time" in request.data:
+            deployment.auto_predict_time = _parse_time_string(request.data["auto_predict_time"])
         deployment.save()
         return Response({"id": str(deployment.id)})
 
@@ -510,10 +606,17 @@ class LaunchLiveRunView(APIView):
         from apps.ml_engine.tasks import run_live_prediction
 
         deployment = LiveDeployment.objects.get(id=deployment_id, user=request.user)
+        existing_today = _find_existing_live_cycle_run(deployment)
+        if existing_today:
+            return Response({
+                "error": "Today prediction already exists for this deployment.",
+                "live_run_id": str(existing_today.id),
+                "status": existing_today.status,
+            }, status=409)
+
         if "date_start" in request.data:
             deployment.date_start = request.data["date_start"]
-        if "date_end" in request.data:
-            deployment.date_end = request.data["date_end"]
+        deployment.date_end = request.data.get("date_end", _yesterday())
         deployment.status = "queued"
         deployment.save(update_fields=["date_start", "date_end", "status", "updated_at"])
 
@@ -575,6 +678,7 @@ class LivePredictionView(APIView):
             "prob_short": run.prob_short,
             "prob_neutral": run.prob_neutral,
             "confidence": run.confidence,
+            "directional_edge": round(float((run.prob_long or 0.0) - (run.prob_short or 0.0)), 4),
             "rsi_14": run.rsi_14,
             "vol_ann": run.vol_ann,
             "stop_loss_pct": run.stop_loss_pct,

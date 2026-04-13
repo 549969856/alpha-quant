@@ -153,9 +153,19 @@ class FeatureEngine:
 # Backtest Engine
 # ─────────────────────────────────────────────
 class BacktestEngine:
-    def __init__(self, confidence_threshold=0.45, transaction_cost=0.002):
+    def __init__(self, confidence_threshold=0.45, transaction_cost=0.002, directional_threshold=0.05):
         self.thr  = confidence_threshold
         self.cost = transaction_cost
+        self.directional_threshold = directional_threshold
+
+    def _target_position(self, p: np.ndarray) -> int:
+        action = int(np.argmax(p))
+        edge = float(p[2] - p[0])
+        if action == 2 and edge >= self.directional_threshold:
+            return 1
+        if action == 0 and edge <= -self.directional_threshold:
+            return -1
+        return 0
 
     def run(self, probs: np.ndarray, actual_ret: np.ndarray,
             dates: list) -> dict:
@@ -173,10 +183,7 @@ class BacktestEngine:
         bh_log  = [{"date": str(dates[0]), "value": 1.0}]
 
         for i, (p, r) in enumerate(zip(probs, actual_ret)):
-            action = int(np.argmax(p))
-            target = 0
-            if action == 2 and p[2] > self.thr: target =  1
-            elif action == 0 and p[0] > self.thr: target = -1
+            target = self._target_position(p)
 
             simple_ret = float(np.exp(r) - 1.0)
             cost  = self.cost if target != pos else 0.0
@@ -226,22 +233,27 @@ class BacktestEngine:
     def predict_tomorrow(self, probs: np.ndarray, feat_df: pd.DataFrame) -> dict:
         """Generate next-day trading recommendation."""
         p      = probs[0]
-        action = int(np.argmax(p))
-        if action == 2 and p[2] > self.thr:   signal = "LONG"
-        elif action == 0 and p[0] > self.thr: signal = "SHORT"
-        else:                                  signal = "NEUTRAL"
+        target = self._target_position(p)
+        if target == 1:
+            signal = "LONG"
+        elif target == -1:
+            signal = "SHORT"
+        else:
+            signal = "NEUTRAL"
 
         latest  = feat_df.iloc[-1]
         rsi     = float(latest.get("RSI_14", np.nan))
         vol_20d = float(latest.get("Vol_20d", 0.01))
         excess  = float(latest.get("Excess_Ret", 0.0)) * 100
+        edge    = float(p[2] - p[0])
 
         return dict(
             signal       = signal,
             prob_long    = round(float(p[2]), 4),
             prob_short   = round(float(p[0]), 4),
             prob_neutral = round(float(p[1]), 4),
-            confidence   = round(float(p.max()) * 100, 2),
+            confidence   = round(float(abs(edge)) * 100, 2),
+            directional_edge = round(edge, 4),
             rsi_14       = round(rsi, 2) if not np.isnan(rsi) else None,
             vol_ann      = round(vol_20d * np.sqrt(252) * 100, 2),
             excess_ret   = round(excess, 3),

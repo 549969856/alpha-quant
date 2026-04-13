@@ -11,6 +11,7 @@ import ExperimentPage   from "./pages/ExperimentPage";
 import TrainingPage     from "./pages/TrainingPage";
 import BacktestPage     from "./pages/BacktestPage";
 import PredictionPage   from "./pages/PredictionPage";
+import LiveDeploymentsPage from "./pages/LiveDeploymentsPage";
 import LiveTradingPage  from "./pages/LiveTradingPage";
 import LiveRunPage      from "./pages/LiveRunPage";
 
@@ -39,6 +40,7 @@ export default function App() {
             <Route path="run/:id/status"     element={<TrainingPage />} />
             <Route path="run/:id/backtest"   element={<BacktestPage />} />
             <Route path="run/:id/prediction" element={<PredictionPage />} />
+            <Route path="live"               element={<LiveDeploymentsPage />} />
             <Route path="live/:id"           element={<LiveTradingPage />} />
             <Route path="live-run/:id/status" element={<LiveRunPage />} />
           </Route>

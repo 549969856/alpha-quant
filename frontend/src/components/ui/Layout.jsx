@@ -6,6 +6,7 @@ import clsx from "clsx";
 const NAV = [
   { to: "/",               Icon: LayoutDashboard, label: "總覽" },
   { to: "/experiment/new", Icon: FlaskConical,     label: "新建實驗" },
+  { to: "/live",           Icon: Activity,         label: "實戰部署" },
 ];
 
 export default function Layout() {
@@ -33,7 +34,7 @@ export default function Layout() {
         {/* Nav */}
         <nav className="flex-1 p-3 space-y-0.5">
           {NAV.map(({to,Icon,label}) => {
-            const active = pathname === to;
+            const active = to === "/live" ? pathname.startsWith("/live") : pathname === to;
             return (
               <Link key={to} to={to}
                 style={{

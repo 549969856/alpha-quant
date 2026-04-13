@@ -3,6 +3,7 @@ apps/ml_engine/models.py
 Experiment → TrainingRun → ModelArtifact → Prediction
 """
 import uuid
+from datetime import time as dt_time
 from django.db import models
 
 
@@ -137,6 +138,9 @@ class LiveDeployment(models.Model):
     feature_ids    = models.JSONField(default=list)
     hparams        = models.JSONField(default=dict)
     random_seed    = models.IntegerField(default=42)
+    auto_predict_enabled = models.BooleanField(default=False)
+    auto_predict_time = models.TimeField(default=dt_time(18, 10))
+    last_auto_predicted_for = models.DateField(null=True, blank=True)
     created_at     = models.DateTimeField(auto_now_add=True)
     updated_at     = models.DateTimeField(auto_now=True)
 

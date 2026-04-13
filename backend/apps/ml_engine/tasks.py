@@ -161,6 +161,21 @@ def _signal_to_position(signal: str) -> int:
     return 0
 
 
+def _find_existing_live_cycle_run(deployment, cycle_date=None):
+    from django.db.models import Q
+
+    cycle_date = cycle_date or timezone.localdate()
+    return (
+        deployment.runs.filter(
+            Q(prediction_date=cycle_date) |
+            Q(created_at__date=cycle_date, status__in=["pending", "training", "done"])
+        )
+        .exclude(status="failed")
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
 @shared_task(bind=True, queue="data_fetch", name="fetch_market_data")
 def fetch_market_data(self, ticker: str, benchmark: str, start: str, end: str) -> dict:
     """Download OHLCV and upsert into TimescaleDB."""
@@ -240,6 +255,7 @@ def run_training(self, run_id: str) -> dict:
         bt_engine = BacktestEngine(
             confidence_threshold=hp.get("confidence_threshold", 0.45),
             transaction_cost=hp.get("transaction_cost", 0.002),
+            directional_threshold=hp.get("directional_threshold", 0.05),
         )
         probs_test = trainer.predict(X_test)
         bt_result = bt_engine.run(probs_test, actual_ret, test_dates)
@@ -364,6 +380,7 @@ def run_live_prediction(self, live_run_id: str) -> dict:
         bt_engine = BacktestEngine(
             confidence_threshold=hp.get("confidence_threshold", 0.45),
             transaction_cost=hp.get("transaction_cost", 0.002),
+            directional_threshold=hp.get("directional_threshold", 0.05),
         )
         last_window = engine.build_last_window(stock_df, bench_df)
         last_probs = trainer.predict(last_window)
@@ -424,6 +441,46 @@ def run_live_prediction(self, live_run_id: str) -> dict:
         deployment.save(update_fields=["status"])
         log.exception("LiveRun %s failed: %s", live_run_id, exc)
         raise
+
+
+@shared_task(bind=True, queue="training", name="run_scheduled_live_predictions")
+def run_scheduled_live_predictions(self) -> dict:
+    from apps.ml_engine.models import LiveDeployment, LiveRun
+
+    now = timezone.localtime()
+    today = timezone.localdate()
+    queued = 0
+
+    deployments = LiveDeployment.objects.filter(auto_predict_enabled=True).select_related("model_arch")
+    for deployment in deployments:
+        if not deployment.auto_predict_time:
+            continue
+        if deployment.last_auto_predicted_for == today:
+            continue
+        if _find_existing_live_cycle_run(deployment, today):
+            continue
+
+        scheduled_at = now.replace(
+            hour=deployment.auto_predict_time.hour,
+            minute=deployment.auto_predict_time.minute,
+            second=deployment.auto_predict_time.second,
+            microsecond=0,
+        )
+        if now < scheduled_at:
+            continue
+
+        deployment.date_end = today - timedelta(days=1)
+        deployment.status = "queued"
+        deployment.last_auto_predicted_for = today
+        deployment.save(update_fields=["date_end", "status", "last_auto_predicted_for", "updated_at"])
+
+        live_run = LiveRun.objects.create(deployment=deployment, status="pending")
+        task = run_live_prediction.apply_async(args=[str(live_run.id)], queue="training")
+        live_run.celery_task_id = task.id
+        live_run.save(update_fields=["celery_task_id"])
+        queued += 1
+
+    return {"queued": queued, "checked_at": now.isoformat()}
 
 
 @shared_task(bind=True, queue="training", name="evaluate_live_feedback")

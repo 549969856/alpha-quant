@@ -106,6 +106,10 @@ CELERY_TASK_ROUTES = {
     "apps.backtest.tasks.*":    {"queue": "training"},
 }
 CELERY_BEAT_SCHEDULE = {
+    "scheduled-live-predictions": {
+        "task": "run_scheduled_live_predictions",
+        "schedule": crontab(minute="*/10"),
+    },
     "evaluate-live-feedback-daily": {
         "task": "evaluate_all_live_feedback",
         "schedule": crontab(hour=18, minute=10),
