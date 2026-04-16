@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 const overlayStyle = {
   position: "fixed",
   inset: 0,
-  background: "rgba(2,6,23,0.72)",
+  background: "rgba(2, 6, 23, 0.72)",
   backdropFilter: "blur(6px)",
   display: "flex",
   alignItems: "center",

@@ -161,6 +161,66 @@ def _signal_to_position(signal: str) -> int:
     return 0
 
 
+def _evaluate_feedback_for_deployment(deployment) -> dict:
+    from apps.ml_engine.models import LivePredictionFeedback
+    from apps.market_data.models import OHLCVBar
+
+    runs = deployment.runs.filter(status="done").order_by("target_date", "created_at")
+
+    reviewed = 0
+    cumulative_pnl = 0.0
+    correct_count = 0
+
+    for idx, run in enumerate(runs, start=1):
+        if not run.target_date or not run.signal:
+            continue
+
+        bar = OHLCVBar.objects.filter(
+            ticker=deployment.ticker,
+            timestamp=run.target_date,
+        ).values("open", "close").first()
+        if not bar or not bar["open"]:
+            continue
+
+        actual_return = float(bar["close"] - bar["open"]) / float(bar["open"])
+        predicted_return = (
+            (run.prob_long or 0.0) - (run.prob_short or 0.0)
+        ) * max(abs(actual_return), 0.0001)
+        position = _signal_to_position(run.signal)
+        realized_pnl = position * actual_return
+        cumulative_pnl += realized_pnl
+        was_correct = (
+            (position == 1 and actual_return > 0) or
+            (position == -1 and actual_return < 0) or
+            (position == 0 and abs(actual_return) <= 0.002)
+        )
+        if was_correct:
+            correct_count += 1
+
+        hit_rate = correct_count / idx
+        alpha_drift = predicted_return - realized_pnl
+
+        LivePredictionFeedback.objects.update_or_create(
+            live_run=run,
+            defaults=dict(
+                deployment=deployment,
+                prediction_date=run.prediction_date,
+                target_date=run.target_date,
+                predicted_signal=run.signal,
+                actual_return=actual_return,
+                predicted_return=predicted_return,
+                realized_pnl=realized_pnl,
+                was_correct=was_correct,
+                hit_rate=hit_rate,
+                cumulative_pnl=cumulative_pnl,
+                alpha_drift=alpha_drift,
+            ),
+        )
+        reviewed += 1
+
+    return {"deployment_id": str(deployment.id), "reviewed": reviewed}
+
+
 def _find_existing_live_cycle_run(deployment, cycle_date=None):
     from django.db.models import Q
 
@@ -485,64 +545,10 @@ def run_scheduled_live_predictions(self) -> dict:
 
 @shared_task(bind=True, queue="training", name="evaluate_live_feedback")
 def evaluate_live_feedback(self, deployment_id: str) -> dict:
-    from apps.ml_engine.models import LiveDeployment, LivePredictionFeedback
-    from apps.market_data.models import OHLCVBar
+    from apps.ml_engine.models import LiveDeployment
 
     deployment = LiveDeployment.objects.get(id=deployment_id)
-    runs = deployment.runs.filter(status="done").order_by("target_date", "created_at")
-
-    reviewed = 0
-    cumulative_pnl = 0.0
-    correct_count = 0
-
-    for idx, run in enumerate(runs, start=1):
-        if not run.target_date or not run.signal:
-            continue
-
-        bar = OHLCVBar.objects.filter(
-            ticker=deployment.ticker,
-            timestamp=run.target_date,
-        ).values("open", "close").first()
-        if not bar or not bar["open"]:
-            continue
-
-        actual_return = float(bar["close"] - bar["open"]) / float(bar["open"])
-        predicted_return = (
-            (run.prob_long or 0.0) - (run.prob_short or 0.0)
-        ) * max(abs(actual_return), 0.0001)
-        position = _signal_to_position(run.signal)
-        realized_pnl = position * actual_return
-        cumulative_pnl += realized_pnl
-        was_correct = (
-            (position == 1 and actual_return > 0) or
-            (position == -1 and actual_return < 0) or
-            (position == 0 and abs(actual_return) <= 0.002)
-        )
-        if was_correct:
-            correct_count += 1
-
-        hit_rate = correct_count / idx
-        alpha_drift = predicted_return - realized_pnl
-
-        LivePredictionFeedback.objects.update_or_create(
-            live_run=run,
-            defaults=dict(
-                deployment=deployment,
-                prediction_date=run.prediction_date,
-                target_date=run.target_date,
-                predicted_signal=run.signal,
-                actual_return=actual_return,
-                predicted_return=predicted_return,
-                realized_pnl=realized_pnl,
-                was_correct=was_correct,
-                hit_rate=hit_rate,
-                cumulative_pnl=cumulative_pnl,
-                alpha_drift=alpha_drift,
-            ),
-        )
-        reviewed += 1
-
-    return {"deployment_id": deployment_id, "reviewed": reviewed}
+    return _evaluate_feedback_for_deployment(deployment)
 
 
 @shared_task(bind=True, queue="training", name="evaluate_all_live_feedback")
@@ -551,6 +557,6 @@ def evaluate_all_live_feedback(self) -> dict:
 
     reviewed = 0
     for deployment in LiveDeployment.objects.filter(status__in=["ready", "running", "queued"]):
-        evaluate_live_feedback(str(deployment.id))
+        _evaluate_feedback_for_deployment(deployment)
         reviewed += 1
     return {"deployments": reviewed}

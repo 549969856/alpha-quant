@@ -1,12 +1,13 @@
 from datetime import datetime, timedelta, time as dt_time
 
-from django.db import connections
+from django.db import connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
+from apps.ml_engine.tasks import _evaluate_feedback_for_deployment
 
 
 def _serialize_run_summary(run):
@@ -96,6 +97,51 @@ def _parse_time_string(value):
         except ValueError:
             continue
     raise ValueError("Invalid time format. Expected HH:MM or HH:MM:SS")
+
+
+def _table_exists(table_name: str, using: str = "default") -> bool:
+    return table_name in connections[using].introspection.table_names()
+
+
+def _delete_experiment_records(exp) -> None:
+    from apps.ml_engine.models import (
+        BacktestResult,
+        Experiment,
+        ModelArtifact,
+        PredictionRecord,
+        TrainingRun,
+    )
+
+    run_ids = list(TrainingRun.objects.filter(experiment=exp).values_list("id", flat=True))
+
+    # Optional backtest-analysis tables may not exist in every environment.
+    if run_ids and _table_exists("walk_forward_results"):
+        from apps.backtest.models import WalkForwardResult
+        WalkForwardResult.objects.filter(run_id__in=run_ids).delete()
+
+    if run_ids and _table_exists("monte_carlo_results"):
+        from apps.backtest.models import MonteCarloResult
+        MonteCarloResult.objects.filter(run_id__in=run_ids).delete()
+
+    if _table_exists("benchmark_comparisons"):
+        from apps.backtest.models import BenchmarkComparison
+        BenchmarkComparison.objects.filter(experiment=exp).delete()
+
+    PredictionRecord.objects.filter(run_id__in=run_ids).delete()
+    BacktestResult.objects.filter(run_id__in=run_ids).delete()
+    ModelArtifact.objects.filter(run_id__in=run_ids).delete()
+    TrainingRun.objects.filter(id__in=run_ids).delete()
+    Experiment.objects.filter(id=exp.id).delete()
+
+
+def _delete_live_deployment_records(deployment) -> None:
+    from apps.ml_engine.models import LiveDeployment, LivePredictionFeedback, LiveRun
+
+    run_ids = list(LiveRun.objects.filter(deployment=deployment).values_list("id", flat=True))
+    LivePredictionFeedback.objects.filter(deployment=deployment).delete()
+    if run_ids:
+        LiveRun.objects.filter(id__in=run_ids).delete()
+    LiveDeployment.objects.filter(id=deployment.id).delete()
 
 
 class ModelRegistryView(APIView):
@@ -224,6 +270,16 @@ class ExperimentViewSet(viewsets.ModelViewSet):
             "updated_at": exp.updated_at,
             "runs": runs,
         })
+
+    def destroy(self, request, pk=None, *args, **kwargs):
+        from apps.ml_engine.models import Experiment
+
+        exp = Experiment.objects.filter(id=pk, user=request.user).first()
+        if not exp:
+            return Response({"error": "Experiment not found"}, status=404)
+        with transaction.atomic():
+            _delete_experiment_records(exp)
+        return Response(status=204)
 
 
 class LaunchTrainingView(APIView):
@@ -597,6 +653,16 @@ class LiveDeploymentDetailView(APIView):
         deployment.save()
         return Response({"id": str(deployment.id)})
 
+    def delete(self, request, deployment_id):
+        from apps.ml_engine.models import LiveDeployment
+
+        deployment = LiveDeployment.objects.filter(id=deployment_id, user=request.user).first()
+        if not deployment:
+            return Response({"error": "Live deployment not found"}, status=404)
+        with transaction.atomic():
+            _delete_live_deployment_records(deployment)
+        return Response(status=204)
+
 
 class LaunchLiveRunView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -701,6 +767,9 @@ class LiveFeedbackView(APIView):
         from apps.ml_engine.models import LivePredictionFeedback, LiveDeployment
 
         deployment = LiveDeployment.objects.get(id=deployment_id, user=request.user)
+        refresh = request.query_params.get("refresh", "1") != "0"
+        if refresh:
+            _evaluate_feedback_for_deployment(deployment)
         rows = list(
             LivePredictionFeedback.objects.filter(deployment=deployment).order_by("target_date").values(
                 "prediction_date",
@@ -715,12 +784,24 @@ class LiveFeedbackView(APIView):
                 "alpha_drift",
             )
         )
+        latest_run = deployment.runs.filter(status="done").order_by("-target_date", "-created_at").first()
         summary = {
             "count": len(rows),
             "latest_hit_rate": rows[-1]["hit_rate"] if rows else 0.0,
             "latest_cumulative_pnl": rows[-1]["cumulative_pnl"] if rows else 0.0,
             "latest_alpha_drift": rows[-1]["alpha_drift"] if rows else 0.0,
+            "latest_target_date": rows[-1]["target_date"] if rows else None,
+            "latest_prediction_date": rows[-1]["prediction_date"] if rows else None,
+            "feedback_ready": bool(rows),
+            "pending_reason": None,
         }
+        if not rows:
+            if not latest_run:
+                summary["pending_reason"] = "No completed live run yet."
+            elif latest_run.target_date and latest_run.target_date > _today():
+                summary["pending_reason"] = "Latest target date has not arrived yet."
+            else:
+                summary["pending_reason"] = "Actual OHLCV for latest target date is not available yet."
         return Response({"summary": summary, "items": rows})
 
 
