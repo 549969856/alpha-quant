@@ -1,0 +1,47 @@
+情況一：只修改了 Python 邏輯（如 views.py, trainer.py, tasks.py）
+因為你目前的 docker-compose.yml 裡面，後端是掛載 Volume (- ./backend:/app) 的，所以你存檔的瞬間，容器內的檔案其實已經更新了。
+但是！ 你後端啟動用的是 gunicorn，它預設不會像 Vite 那樣自動重新載入畫面。
+
+怎麼做： 不需要重新 build！只要叫容器重啟，讓它重新讀取新的 Python 檔就好。
+
+指令：
+
+Bash
+docker compose restart backend
+⚠️ 防呆提醒： 如果你改的是 tasks.py 或是機器學習演算法，Celery 也必須重啟才能吃到新程式碼！
+
+Bash
+docker compose restart backend celery_worker
+
+情況二：修改了資料庫欄位（如改了 models.py）
+這是新手最常踩雷的地方。你加了一個新欄位，以為重啟就好，結果直接噴 ProgrammingError: column does not exist。
+
+怎麼做： 只要動到 models.py，就必須手動產生遷移檔 (makemigrations) 並寫入資料庫 (migrate)。
+
+指令： 直接在「不關閉系統」的情況下，派指令進去 backend 容器執行：
+
+Bash
+docker compose exec backend python manage.py makemigrations
+docker compose exec backend python manage.py migrate
+
+情況三：安裝了新套件（修改了 requirements.txt）
+假設你為了寫新的金融指標，在 requirements.txt 裡面加了 pandas-ta，或者是加了 optuna。這時候因為容器一開始的環境沒有這些東西，光靠 restart 是沒用的。
+
+怎麼做： 必須針對後端重新打包 (Build) 映像檔，讓它跑一次 pip install。
+
+指令：
+
+Bash
+docker compose up -d --build backend celery_worker
+(因為 backend 和 celery_worker 共用同一個 requirements.txt，所以兩個都要重新 build)
+
+情況四：架構大地震（改了 docker-compose.yml、加了新資料庫或改了 Dockerfile）
+如果你動了環境變數、改了 Port，或是像我們昨天那樣把 Nginx 整個拔掉換成 Vite，這種「動搖國本」的修改，就不能客氣了。
+
+怎麼做： 把整個專案的容器停下來，然後強制全部重新建構。
+
+指令：
+
+Bash
+docker compose down
+docker compose up -d --build
