@@ -60,13 +60,12 @@ function StatBox({ label, value, tone = "#f8fafc" }) {
   );
 }
 
-function JsonBlock({ title, value }) {
+function ParameterCard({ label, value, hint, tone = "#e2e8f0" }) {
   return (
     <div style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
-      <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8 }}>{title}</div>
-      <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#e2e8f0", fontSize: 12, lineHeight: 1.6, fontFamily: "'JetBrains Mono', monospace" }}>
-        {JSON.stringify(value ?? {}, null, 2)}
-      </pre>
+      <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6 }}>{label}</div>
+      <div style={{ color: tone, fontSize: 18, fontWeight: 800, marginBottom: hint ? 6 : 0 }}>{value}</div>
+      {hint ? <div style={{ color: "#94a3b8", fontSize: 12, lineHeight: 1.6 }}>{hint}</div> : null}
     </div>
   );
 }
@@ -105,6 +104,29 @@ function wrongPredictionAreaDot(props) {
     return <circle cx={cx} cy={cy} r={5} fill="#ef4444" stroke="#fee2e2" strokeWidth={2} />;
   }
   return <circle cx={cx} cy={cy} r={3} fill="#34d399" />;
+}
+
+const HPARAM_META = {
+  lr: { label: "學習率", format: value => Number(value).toLocaleString("zh-TW", { maximumSignificantDigits: 3 }), hint: "控制每次權重更新幅度，越小越穩定。" },
+  epochs: { label: "訓練輪數", format: value => `${value} 輪`, hint: "模型完整看過資料的次數。" },
+  batch_size: { label: "批次大小", format: value => `${value} 筆`, hint: "每次訓練送入模型的樣本數。" },
+  seq_length: { label: "觀察天數", format: value => `${value} 天`, hint: "每次預測前回看多少交易日。" },
+  transaction_cost: { label: "交易成本", format: value => pct(value), hint: "模擬手續費與滑價對績效的影響。" },
+  confidence_threshold: { label: "信心門檻", format: value => `${(Number(value) * 100).toFixed(0)}%`, hint: "舊版決策保留的信號門檻參考值。" },
+  directional_threshold: { label: "方向差門檻", format: value => `${(Number(value) * 100).toFixed(0)}%`, hint: "做多與做空機率差距至少達到這個值才進場。" },
+  dropout: { label: "Dropout", format: value => `${(Number(value) * 100).toFixed(0)}%`, hint: "降低過擬合的隨機失活比例。" },
+  d_model: { label: "模型寬度", format: value => `${value}`, hint: "Transformer 內部向量維度。" },
+  nhead: { label: "注意力頭數", format: value => `${value} 頭`, hint: "同時觀察不同時序關聯的子空間數量。" },
+  num_layers: { label: "模型層數", format: value => `${value} 層`, hint: "堆疊的編碼層數量。" },
+  train_ratio: { label: "訓練比例", format: value => `${(Number(value) * 100).toFixed(0)}%`, hint: "保留給模型學習的資料比例。" },
+};
+
+function formatHparamValue(key, value) {
+  if (value == null) return "-";
+  const formatter = HPARAM_META[key]?.format;
+  if (formatter) return formatter(value);
+  if (typeof value === "number") return Number(value).toLocaleString("zh-TW");
+  return String(value);
 }
 
 export default function LiveTradingPage() {
@@ -203,6 +225,16 @@ export default function LiveTradingPage() {
       };
     });
   }, [deployment?.feature_ids, featureMap]);
+
+  const parameterCards = useMemo(() => {
+    const hparams = deployment?.hparams || {};
+    return Object.entries(hparams).map(([key, value]) => ({
+      key,
+      label: HPARAM_META[key]?.label || key,
+      value: formatHparamValue(key, value),
+      hint: HPARAM_META[key]?.hint || "目前部署沿用的模型設定值。",
+    }));
+  }, [deployment?.hparams]);
 
   if (isLoading || !deployment) {
     return <div style={{ color: "#94a3b8" }}>載入實戰部署中...</div>;
@@ -359,9 +391,21 @@ export default function LiveTradingPage() {
           )}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <JsonBlock title="Hyperparameters" value={deployment.hparams} />
-          <JsonBlock title="Feature IDs" value={deployment.feature_ids} />
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 10 }}>模型設定摘要</div>
+          <div style={{ color: "#cbd5e1", lineHeight: 1.8, marginBottom: 14, fontSize: 13 }}>
+            這裡顯示的是這個實戰部署目前沿用的訓練設定，方便快速理解模型是用什麼節奏、成本假設與網路規模在產生明日訊號。
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
+          {parameterCards.length === 0 ? (
+            <div style={{ color: "#94a3b8" }}>目前沒有可顯示的模型設定。</div>
+          ) : (
+            parameterCards.map(item => (
+              <ParameterCard key={item.key} label={item.label} value={item.value} hint={item.hint} />
+            ))
+          )}
         </div>
       </div>
 
@@ -379,7 +423,7 @@ export default function LiveTradingPage() {
                     <div style={{ color: "#94a3b8", fontSize: 12 }}>{fmtDate(run.created_at, true)}</div>
                   </div>
                   <div style={{ color: "#cbd5e1", fontSize: 12, lineHeight: 1.7 }}>
-                    <div>訓練區間：{run.training_window_start || "-"} -> {run.training_window_end || "-"}</div>
+                    <div>訓練區間：{run.training_window_start || "-"} {"->"} {run.training_window_end || "-"}</div>
                     <div>目標日期：{run.target_date || "-"}</div>
                     <div>信心度：{run.confidence != null ? `${Number(run.confidence).toFixed(1)}%` : "-"}</div>
                   </div>
